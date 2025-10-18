@@ -1,0 +1,17 @@
+[
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-c",
+      "-Wall",
+      "-I/home/vismay3003/linux-5.15.165/include",
+      "-I/home/vismay3003/linux-5.15.165/arch/x86/include",
+      "-o",
+      "/home/vismay/x86-hypervisor/build/main",
+      "src/main.c"
+    ],
+    "directory": "/home/vismay/x86-hypervisor",
+    "file": "/home/vismay/x86-hypervisor/src/main.c",
+    "output": "/home/vismay/x86-hypervisor/build/main"
+  }
+]

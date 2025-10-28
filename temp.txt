@@ -1,0 +1,6 @@
+=== Resetting VirtIO console device ===
+=== Guest OS has noticed device ===
+=== Guest OS knows how to drive device ===
+=== Driver has acknowledged recognizable features; feature negotiation complete ===
+=== Driver is set up; console device is live ===
+[KVM_EXIT_HLT: program halted normally] 

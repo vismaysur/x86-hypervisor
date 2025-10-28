@@ -18,7 +18,18 @@
 
 #define CR0_PE              1u
 
-void setup_sregs(struct kvm_sregs* sregs) {
+// Set initial state of VCPU special registers (Intel x86-64)
+static inline int setup_sregisters(int vcpufd) {
+    int ret;
+    struct kvm_sregs sregs;
+
+    // get data structure to configure initial state of special registers of the VCPU
+    ret = ioctl(vcpufd, KVM_GET_SREGS, &sregs);
+    if (ret == -1) {
+        fprintf(stderr, "ioctl(): %s\n", strerror(errno));
+        return 1;
+    } 
+
     // set fields for default segment config
     struct kvm_segment segment = {
         .base = 0x0,
@@ -32,33 +43,62 @@ void setup_sregs(struct kvm_sregs* sregs) {
         .selector = 1 << 3
     };
 
-    sregs->cs = segment;
-    sregs->cr0 |= 1;
+    sregs.cs = segment;
+    sregs.cr0 |= 1;
 
     // code segment and other segments must have different segment selectors
     segment.selector = 2 << 3;
     segment.type = 3;
-    sregs->ds = sregs->es = sregs->gs = sregs->fs = sregs->ss = segment;
+    sregs.ds = sregs.es = sregs.gs = sregs.fs = sregs.ss = segment;
+
+    ret = ioctl(vcpufd, KVM_SET_SREGS, &sregs);
+    if (ret == -1) {
+        fprintf(stderr, "ioctl(): %s\n", strerror(errno));
+        return 1;
+    } 
+
+    return 0;
 }
 
-int main() {
-    int kvm, ret, vmfd, vcpufd, guestcode_fd;
-    off_t guestcode_size;
-    void *guest_mem;
-    struct kvm_run* run;
-    size_t kvm_run_mmap_size;
-    struct kvm_userspace_memory_region memregion;
-    struct kvm_regs regs;
-    struct kvm_sregs sregs;
-    bool halted;
-    uint8_t* code;
+// Set initial state of VCPU registers (Intel x86-64)
+static inline int setup_registers(int vcpufd) {
+    struct kvm_regs regs = {0};
+    int ret;
 
-    // read guest.bin from disk
-    guestcode_fd = open("build/guest.bin", O_RDONLY);
-    if (guestcode_fd == -1) {
-        fprintf(stderr, "open(): %s\n", strerror(errno));
-        return 1; 
-    }
+     // init most of general purpose regs to 0, set some fields
+    regs.rip = PAGE_SIZE;
+    regs.rflags = 0x2;
+    // memory allocated for stack has physical addr range 0x1000-0x2000
+    regs.rsp = 0x2FFF;     
+    ret = ioctl(vcpufd, KVM_SET_REGS, &regs);
+    if (ret == -1) {
+        fprintf(stderr, "ioctl(): %s\n", strerror(errno));
+        return 1;
+    } 
+
+    return 0;
+}
+
+// Set up guest VM's "physical memory" region.
+//
+// Note 1: Physical addr starts at 0x1000 with a simple 2 page layout to
+// hold guest code in page 0 (0x1000-0x1FFF) and stack in page 1 (0x2000-0x2FFF).
+// Note 2: Actual memory resource doesn't belong to any specific process, it is mapped to 
+// shared and anonymous zero-initialized memory that can be read from and written to by 
+// both, the hypervisor and the guest VM.
+//
+// Arg 0: guest_codefd = file descriptor of binary containing guest code, to be loaded to page 0.
+// Arg 1: VM file descriptor used for KVM ioctls
+// Arg 2: guest_mem = void pointer to guest memory starting address in hypervisor address space
+//
+// Critical: must write the (pointer to mmapped guest memory address) to `guest_mem` (arg 2) 
+// for further use and unmapping in caller.
+static inline int setup_memory_region(int guestcode_fd, int vmfd, void** guest_mem) {
+    off_t guestcode_size;
+    int ret;
+    uint8_t* code;
+    void* guest_physical_mem;
+    struct kvm_userspace_memory_region memregion = {0};
 
     // get size of guest binary
     guestcode_size = lseek(guestcode_fd, 0, SEEK_END);
@@ -87,6 +127,47 @@ int main() {
         return 1; 
     }
 
+    // allocate single page of page aligned, zero-initialized shared memory to hold guest code
+    guest_physical_mem = mmap(NULL, PAGE_SIZE * 2, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0); 
+    if (guest_physical_mem == (void*) -1) {
+        fprintf(stderr, "mmap(): %s\n", strerror(errno));
+        return 1;
+    }
+
+    // copy machine code into mapped memory
+    memcpy(guest_physical_mem, code, guestcode_size);
+
+    // free memory used to hold guest binary, read into allocated memory.
+    free(code);
+
+    // inform VM of allocated and mapped memory
+    memregion.slot = 0;
+    memregion.guest_phys_addr = PAGE_SIZE;
+    // second page of VM's "physical" address space
+    // avoids conflict with with non-existent real-mode interrupt descriptor table
+    // at address 0
+    memregion.memory_size = 2 * PAGE_SIZE;
+    memregion.userspace_addr = (uint64_t) guest_physical_mem;
+
+    ret = ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &memregion);
+    if (ret == -1) {
+        fprintf(stderr, "ioctl(): %s\n", strerror(errno));
+        return 1;
+    } 
+
+    // assign (pointer to newly mapped guest memory address) to guest_mem
+    *guest_mem = guest_physical_mem;
+
+    return 0;
+}
+
+int main() {
+    int kvm, ret, vmfd, vcpufd, guestcode_fd;
+    void *guest_mem;
+    struct kvm_run* run;
+    size_t kvm_run_mmap_size;
+    bool halted;
+
     // user logged in at console must be part of kvm group to access /dev/kvm
     kvm = open("/dev/kvm", O_RDWR | O_CLOEXEC);
     if (kvm == -1) {
@@ -114,30 +195,15 @@ int main() {
         return 1;
     }
 
-    // allocate single page of page aligned, zero-initialized shared memory to hold guest code
-    guest_mem = mmap(NULL, PAGE_SIZE * 2, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0); 
-    if (guest_mem == (void*) -1) {
-        fprintf(stderr, "mmap(): %s\n", strerror(errno));
-        return 1;
+     // read guest.bin from disk
+    guestcode_fd = open("build/guest.bin", O_RDONLY);
+    if (guestcode_fd == -1) {
+        fprintf(stderr, "open(): %s\n", strerror(errno));
+        return 1; 
     }
 
-    // copy machine code into mapped memory
-    memcpy(guest_mem, code, guestcode_size);
-
-    // inform VM of allocated and mapped memory
-    memregion.slot = 0;
-    memregion.guest_phys_addr = PAGE_SIZE;
-    // second page of VM's "physical" address space
-    // avoids conflict with with non-existent real-mode interrupt descriptor table
-    // at address 0
-    memregion.memory_size = 2 * PAGE_SIZE;
-    memregion.userspace_addr = (uint64_t) guest_mem;
-
-    ret = ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &memregion);
-    if (ret == -1) {
-        fprintf(stderr, "ioctl(): %s\n", strerror(errno));
-        return 1;
-    } 
+    // set up VM memory region and copy guest code to it
+    if ((ret = setup_memory_region(guestcode_fd, vmfd, &guest_mem))) return ret;
 
     // create virtual CPU to run code in guest physical memory.
     vcpufd = ioctl(vmfd, KVM_CREATE_VCPU, 0);
@@ -159,32 +225,12 @@ int main() {
         fprintf(stderr, "mmap(): %s\n", strerror(errno));
         return 1;
     }
+    
+    // set up VCPU special regs initial state 
+    if ((ret = setup_sregisters(vcpufd))) return ret;
 
-    // set initial state of registers of the VCPU
-    ret = ioctl(vcpufd, KVM_GET_SREGS, &sregs);
-    if (ret == -1) {
-        fprintf(stderr, "ioctl(): %s\n", strerror(errno));
-        return 1;
-    } 
-
-    setup_sregs(&sregs);
-
-    ret = ioctl(vcpufd, KVM_SET_SREGS, &sregs);
-    if (ret == -1) {
-        fprintf(stderr, "ioctl(): %s\n", strerror(errno));
-        return 1;
-    } 
-
-    // init most of general purpose regs to 0, set some fields
-    regs.rip = PAGE_SIZE;
-    regs.rflags = 0x2;
-    // memory allocated for stack has physical addr range 0x1000-0x2000
-    regs.rsp = 0x2FFF;     
-    ret = ioctl(vcpufd, KVM_SET_REGS, &regs);
-    if (ret == -1) {
-        fprintf(stderr, "ioctl(): %s\n", strerror(errno));
-        return 1;
-    } 
+    // set up VCPU regs initial state
+    if ((ret = setup_registers(vcpufd))) return ret;
 
     halted = false;
 

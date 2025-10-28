@@ -37,17 +37,8 @@ void setup_sregs(struct kvm_sregs* sregs) {
 
     // code segment and other segments must have different segment selectors
     segment.selector = 2 << 3;
-    segment.base = 0x2000;
     segment.type = 3;
-
-    sregs->ds = segment;
-    sregs->es = segment;
-    sregs->gs = segment;
-    sregs->ss = segment;
-
-    // override MMIO with flat segment addresses
-    segment.base = 0;
-    sregs->fs = segment;
+    sregs->ds = sregs->es = sregs->gs = sregs->fs = sregs->ss = segment;
 }
 
 int main() {
@@ -187,7 +178,8 @@ int main() {
     // init most of general purpose regs to 0, set some fields
     regs.rip = PAGE_SIZE;
     regs.rflags = 0x2;
-    regs.rsp = 0x0FFF;
+    // memory allocated for stack has physical addr range 0x1000-0x2000
+    regs.rsp = 0x2FFF;     
     ret = ioctl(vcpufd, KVM_SET_REGS, &regs);
     if (ret == -1) {
         fprintf(stderr, "ioctl(): %s\n", strerror(errno));
@@ -197,6 +189,7 @@ int main() {
     halted = false;
 
     while (1) {
+        // run VM with Intel VT
         ret = ioctl(vcpufd, KVM_RUN, NULL);
         if (ret == -1) {
             fprintf(stderr, "ioctl(): %s\n", strerror(errno));
@@ -204,10 +197,12 @@ int main() {
         } 
 
         switch (run->exit_reason) {
+            // VM called `hlt` instruction
             case KVM_EXIT_HLT:
                 printf("[KVM_EXIT_HLT: program halted normally] \n");
                 halted = true;
                 break;
+            // VM wrote to i/o port
             case KVM_EXIT_IO:
                 if (run->io.direction == KVM_EXIT_IO_OUT && 
                     run->io.size == 1 &&
@@ -217,6 +212,8 @@ int main() {
                 else
                     fprintf(stderr, "[unhandled KVM_EXIT_IO] \n");
                 break;
+            // VM read/wrote to memory outside its physical addr range
+            // Used for VirtIO MMIO
             case KVM_EXIT_MMIO:
                 if (run->mmio.phys_addr < VIRTIO_MMIO_BASE || run->mmio.phys_addr >= VIRTIO_MMIO_BASE + VIRTIO_MMIO_SIZE) {
                     fprintf(stderr, "[unhandled MMIO @ 0x%llx] \n", run->mmio.phys_addr);
@@ -226,6 +223,7 @@ int main() {
                 if (run->mmio.is_write) handle_mmio_write(run->mmio.phys_addr, run->mmio.data, run->mmio.len);
                 else handle_mmio_read(run->mmio.phys_addr, run->mmio.data, run->mmio.len);
                 break;
+            // Likely set up VCPU incorrectly and doesn't align with Intel VT pre-reqs
             case KVM_EXIT_FAIL_ENTRY:
                 fprintf(
                     stderr, 
@@ -234,6 +232,7 @@ int main() {
                 );
                 halted = true;
                 break;
+            // Error internal to KVM
             case KVM_INTERNAL_ERROR_EMULATION:
                 fprintf(
                     stderr,

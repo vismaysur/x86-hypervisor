@@ -1,6 +1,21 @@
 [
   {
     "arguments": [
+      "/home/vismay/opt/cross/bin/i686-elf-gcc",
+      "-c",
+      "-ffreestanding",
+      "-m32",
+      "-o2",
+      "-o",
+      "build/guest.elf",
+      "guest/main.c"
+    ],
+    "directory": "/home/vismay/x86-hypervisor",
+    "file": "/home/vismay/x86-hypervisor/guest/main.c",
+    "output": "/home/vismay/x86-hypervisor/build/guest.elf"
+  },
+  {
+    "arguments": [
       "/usr/bin/gcc",
       "-c",
       "-Wall",

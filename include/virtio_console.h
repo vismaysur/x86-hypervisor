@@ -26,9 +26,17 @@
 #define REG_INTERRUPT_STATUS    0x060
 #define REG_INTERRUPT_ACK       0x064   
 #define REG_STATUS              0X070
+#define REG_QUEUE_DESC_LOW      0x080
+#define REG_QUEUE_DESC_HIGH     0X084
+#define REG_QUEUE_DRIVER_LOW    0X090
+#define REG_QUEUE_DRIVER_HIGH   0X094
+#define REG_QUEUE_DEVICE_LOW    0X0a0
+#define REG_QUEUE_DEVICE_HIGH   0X0a4
 
 // Host offered features
-// BIT(0) = VIRTIO_CONSOLE_F_SIZE, BIT(32) = VIRTIO_F_VERSION_1
+// BIT(0) = VIRTIO_CONSOLE_F_SIZE
+// BIT(32) = VIRTIO_F_VERSION_1
+// BIT(35) = VIRTIO_F_IN_ORDER
 extern uint64_t device_features;
 
 // Guest accepted features; initialized to 0
@@ -48,11 +56,10 @@ extern uint16_t queue_num_max;
 
 // Virtqueue used for guest-device communication
 struct virtqueue {
-    uint32_t desc_addr;
-    uint32_t avail_addr;
-    uint32_t used_addr;
+    uint64_t desc_addr;
+    uint64_t avail_addr;
+    uint64_t used_addr;
     uint16_t num;
-    uint16_t last_avail_idx;
 };
 
 // Virtqueues used for device-guest communication
@@ -65,6 +72,9 @@ struct console_config_space {
 };
 
 extern struct console_config_space console_config;
+
+// Base address of guest "physical memory".
+extern void* guest_physical_mem_base;
 
 // Handler for KVM_EXIT_MMIO: driver read from memory mapped control registers belonging 
 // to VirtIO console device).

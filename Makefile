@@ -7,7 +7,8 @@ INCLUDE_DIR := $(PWD)/include
 all:
 	@ mkdir -p build
 	@ echo "=== Building Guest Code ==="
-	@ nasm -f bin src/guest.asm -o build/guest.bin
+	@ $(TARGET)-gcc -ffreestanding -m32 -o2 -nostdlib -T $(PWD)/linker.ld guest/main.c -o build/guest.elf
+	@ $(TARGET)-objcopy -O binary build/guest.elf build/guest.bin
 	@ echo "Guest code size: $$(stat -c%s build/guest.bin) bytes"
 	@ echo "=== Building VMM ==="
 	@ gcc -Wall -g -I$(KERNEL_SRC)/include -I$(KERNEL_SRC)/arch/x86/include -I$(INCLUDE_DIR) src/main.c src/virtio_console.c -o $(BUILD_DIR)/main

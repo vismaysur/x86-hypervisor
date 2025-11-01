@@ -7,7 +7,7 @@ INCLUDE_DIR := $(PWD)/include
 all:
 	@ mkdir -p build
 	@ echo "=== Building Guest Code ==="
-	@ $(TARGET)-gcc -ffreestanding -m32 -o2 -nostdlib -T $(PWD)/linker.ld guest/main.c -o build/guest.elf
+	@ $(TARGET)-gcc -ffreestanding -m32 -o2 -nostdlib -T $(PWD)/linker.ld -I$(INCLUDE_DIR) guest/main.c -o build/guest.elf
 	@ $(TARGET)-objcopy -O binary build/guest.elf build/guest.bin
 	@ echo "Guest code size: $$(stat -c%s build/guest.bin) bytes"
 	@ echo "=== Building VMM ==="

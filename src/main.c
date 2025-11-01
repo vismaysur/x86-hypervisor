@@ -71,8 +71,8 @@ static inline int setup_registers(int vcpufd) {
      // init most of general purpose regs to 0, set some fields
     regs.rip = PAGE_SIZE;
     regs.rflags = 0x2;
-    // memory allocated for stack has physical addr range 0x1000-0x2000
-    regs.rsp = 0x4000;     
+    // memory allocated for stack has physical addr range 0x4000-0x4FFF
+    regs.rsp = 0x5000;     
     ret = ioctl(vcpufd, KVM_SET_REGS, &regs);
     if (ret == -1) {
         fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
@@ -84,9 +84,9 @@ static inline int setup_registers(int vcpufd) {
 
 // Set up guest VM's "physical memory" region.
 //
-// Note 1: Physical addr starts at 0x1000 with a simple 4 page layout to
-// hold guest code in pages 0-1 (0x1000-0x2FFF), stack in page 2 (0x3000-0x3FFF) and
-// virtrings in page 3 (0x4000-0x4FFF).
+// Note 1: Physical addr starts at 0x1000 with a simple 5 page layout to
+// hold guest code in pages 0-2 (0x1000-0x3FFF), stack in page 3 (0x4000-0x4FFF) and
+// virtrings in page 4 (0x5000-0x5FFF).
 // Note 2: Actual memory resource doesn't belong to any specific process, it is mapped to 
 // shared and anonymous zero-initialized memory that can be read from and written to by 
 // both, the hypervisor and the guest VM.
@@ -132,7 +132,7 @@ static inline int setup_memory_region(int guestcode_fd, int vmfd, void** guest_m
     }
 
     // allocate 4 pages of page aligned, zero-initialized shared memory to hold guest code and other segments.
-    guest_physical_mem = mmap(NULL, PAGE_SIZE * 4, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0); 
+    guest_physical_mem = mmap(NULL, PAGE_SIZE * 5, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0); 
     if (guest_physical_mem == (void*) -1) {
         fprintf(stderr, ERROR_COLOR "mmap(): %s\n" RESET_COLOR, strerror(errno));
         return 1;
@@ -150,7 +150,7 @@ static inline int setup_memory_region(int guestcode_fd, int vmfd, void** guest_m
     // second page of VM's "physical" address space
     // avoids conflict with with non-existent real-mode interrupt descriptor table
     // at address 0
-    memregion.memory_size = 4 * PAGE_SIZE;
+    memregion.memory_size = 5 * PAGE_SIZE;
     memregion.userspace_addr = (uint64_t) guest_physical_mem;
 
     ret = ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &memregion);
@@ -308,7 +308,7 @@ int main() {
     }
 
     // release memory page allocated for guest VM's memory
-    ret = munmap(guest_mem, PAGE_SIZE * 3);
+    ret = munmap(guest_mem, PAGE_SIZE * 5);
      if (ret == -1) {
         fprintf(stderr, ERROR_COLOR "munmap(): %s\n" RESET_COLOR, strerror(errno));
         return 1;

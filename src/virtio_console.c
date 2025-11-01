@@ -1,8 +1,12 @@
 #include "virtio_console.h"
 #include "helpers.h"
+#include "virtio_control_regs.h"
+#include <errno.h>
+#include <linux/kvm.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 
 // Host offered features
 // BIT(0) = VIRTIO_CONSOLE_F_SIZE
@@ -38,11 +42,28 @@ struct console_config_space console_config = {
     .rows = 24
 };
 
+// Manually injects interrupt into VM
+static inline int inject_interrupt_manual(int vcpufd, uint32_t irq_number) {
+    struct kvm_interrupt irq = {
+        .irq = irq_number
+    };
+
+    int ret = ioctl(vcpufd, KVM_INTERRUPT, &irq);
+    if (ret == -1) {
+        fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+        return 1;
+    }
+
+    return 0;
+}
+
 // Convert guest "physical" address to host virtual address
 static inline void* guest_to_host_va(uint32_t ptr) {
     return (char *) guest_physical_mem_base + (ptr - 0x1000); 
 }
 
+// Initialization is done in kernel-space (Vhost)
+// Userspace func kept here for benchmarking.
 static inline void initialize_used_ring(void* ring_addr) {
     // used->flags
     *((char*) ring_addr) = 0;           
@@ -50,7 +71,9 @@ static inline void initialize_used_ring(void* ring_addr) {
     *((char*) ring_addr + 16) = 0;
 }
 
-static inline void walk_used_vring(uint8_t selected_queue) {    
+// Virtqueue is done in kernel-space (Vhost)
+// Userspace func kept here for benchmarking.
+static inline void walk_used_vring(uint8_t selected_queue, int vcpufd) {    
     char* avail_base = (char *) guest_to_host_va(queues[selected_queue].avail_addr);
     uint16_t avail_idx = *(uint16_t*)(avail_base + 2);
 
@@ -80,12 +103,13 @@ static inline void walk_used_vring(uint8_t selected_queue) {
     // update used_idx to reflect walked used vring entries
     *(uint16_t*)(used_base + 2) = used_idx;
 
-    // TODO: send used buffer notification
+    interrupt_status |= 1;
+    // inject_interrupt_manual(vcpufd, 33);
 }
 
 // Handler for KVM_EXIT_MMIO: driver read from memory mapped control registers belonging 
 // to VirtIO console device).
-void handle_mmio_read(uint64_t address, unsigned char* data, int len) {
+void handle_mmio_read(uint64_t address, unsigned char* data, int len, int vcpufd) {
     switch (address - VIRTIO_MMIO_BASE) {
         case REG_MAGIC: {
             uint32_t magicnum = MAGIC_NUMBER;
@@ -125,7 +149,7 @@ void handle_mmio_read(uint64_t address, unsigned char* data, int len) {
 
 // Handler for KVM_EXIT_MMIO: driver wrote to memory mapped control registers belonging 
 // to VirtIO console device).
-void handle_mmio_write(uint64_t address, unsigned char* data, int len) {
+void handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd) {
    switch (address - VIRTIO_MMIO_BASE) {
         case REG_STATUS: {
             uint8_t value_written;
@@ -154,7 +178,8 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len) {
                         printf(DEBUG_COLOR "=== Driver is set up; console device is live ===\n" RESET_COLOR);
                         // If DRIVER_OK is set, after it sets DEVICE_NEEDS_RESET, the device MUST send a device configuration change notification to the driver.
                         if (device_status & (1 << 6)) {
-                            // TODO: send device config change notification
+                            interrupt_status |= (1 << 1);
+                            // inject_interrupt_manual(vcpufd, 33);
                         }
                         break;
                     }
@@ -184,6 +209,9 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len) {
             break;
         }
         case REG_QUEUE_NOTIFY: {
+            // Virtqueue processing should be done in kernel-space (Vhost)
+            // Userspace logic kept here for benchmarking
+
             // The device MUST NOT consume buffers or send any used buffer notifications 
             // to the driver before DRIVER_OK.
             if (!(device_status & 4)) return;
@@ -194,7 +222,7 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len) {
             // Devices for which QueueReady is set to 0 must not be active.
             if (!queues[queue_sel].queue_ready) return;
 
-            walk_used_vring(queue_sel);
+            walk_used_vring(queue_sel, vcpufd);
             break;
         }
         case REG_DEVICE_FEATURES_SEL: {
@@ -237,9 +265,16 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len) {
         case REG_QUEUE_DRIVER_HIGH:
         case REG_QUEUE_DEVICE_HIGH:
             break;
-        case REG_QUEUE_READY:
+        case REG_QUEUE_READY: {
             memcpy(&queues[queue_sel].queue_ready, data, len);
             break;
+        }
+        case REG_INTERRUPT_ACK: {
+            uint8_t interrupt_acked;
+            memcpy(&interrupt_acked, data, len);
+            interrupt_status ^= interrupt_acked;
+            break;
+        }
         default:
             fprintf(stderr, ERROR_COLOR "[Error: doesn't handle MMIO read @ 0x%lx, of size %d]\n" RESET_COLOR, address, len);
     }

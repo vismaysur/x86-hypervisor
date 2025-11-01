@@ -276,9 +276,9 @@ int main() {
                 }
 
                 if (run->mmio.is_write) 
-                    handle_mmio_write(run->mmio.phys_addr, run->mmio.data, run->mmio.len);
+                    handle_mmio_write(run->mmio.phys_addr, run->mmio.data, run->mmio.len, vcpufd);
                 else 
-                    handle_mmio_read(run->mmio.phys_addr, run->mmio.data, run->mmio.len);
+                    handle_mmio_read(run->mmio.phys_addr, run->mmio.data, run->mmio.len, vcpufd);
                 
                 break;
             }
@@ -299,6 +299,11 @@ int main() {
                     ERROR_COLOR "[KVM_INTERNAL_ERROR_EMULATION: suberror = 0x%x] \n" RESET_COLOR,
                     run->emulation_failure.suberror
                 );
+                halted = true;
+                break;
+            }
+            default: {
+                fprintf(stderr, ERROR_COLOR "[Unhandled KVM exit reason: %d]\n" RESET_COLOR, run->exit_reason);
                 halted = true;
                 break;
             }

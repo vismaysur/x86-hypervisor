@@ -57,10 +57,10 @@ extern void* guest_physical_mem_base;
 
 // Handler for KVM_EXIT_MMIO: driver read from memory mapped control registers belonging 
 // to VirtIO console device).
-void handle_mmio_read(uint64_t address, unsigned char* data, int len);
+void handle_mmio_read(uint64_t address, unsigned char* data, int len, int vcpufd);
 
 // Handler for KVM_EXIT_MMIO: driver wrote to memory mapped control registers belonging 
 // to VirtIO console device).
-void handle_mmio_write(uint64_t address, unsigned char* data, int len);
+void handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd);
 
 #endif

@@ -11,22 +11,6 @@
 #define CONSOLE_VIRTQUEUE_SIZE  0x10
 
 uint16_t next_free_desc = 0;
-uint8_t interrupt_received = 0;
-
-struct idt_entry {
-   uint16_t offset_low;         // offset bits 0..15
-   uint16_t selector;           // a code segment selector in GDT or LDT
-   uint8_t  zero;               // unused, set to 0
-   uint8_t  type_attributes;    // gate type, dpl, and p fields
-   uint16_t offset_high;        // offset bits 16..31
-} __attribute__((packed));
-
-struct idt_entry idt[256] __attribute__((aligned(8)));
-
-struct {
-    uint32_t offset;    // base
-    uint16_t size;      // bounds
-} __attribute__((packed)) idtr;
 
 __attribute__((always_inline))
 static inline void outb(uint16_t port, uint8_t val) {
@@ -182,7 +166,7 @@ static inline void init_virtio_console() {
     uint8_t queue_ready = mmio_read8(device_mmio_base, REG_QUEUE_READY);
 
     if (!queue_ready) {
-        mmio_write32(device_mmio_base, REG_QUEUE_SEL, 1);                    // QueueSel
+        mmio_write16(device_mmio_base, REG_QUEUE_SEL, 1);                    // QueueSel
 
         // verify that host supports required queue size
         
@@ -229,43 +213,6 @@ static inline void close_virtio_console() {
     while (mmio_read8(device_mmio_base, REG_QUEUE_READY) != 0);
 }
 
-void handle_interrupt() {
-//     volatile void* device_mmio_base = (void *) VIRTIO_MMIO_BASE;
-
-//     int interrupt_status = mmio_read8(device_mmio_base, REG_INTERRUPT_STATUS);
-
-//     if (interrupt_status & 1) {
-//         // Used buffer notification
-//         interrupt_received = 1;
-//     }
-
-//     if (interrupt_status & 2) {
-//         // Config change notification
-//         uint8_t device_status = mmio_read8(device_mmio_base, REG_STATUS);
-        
-//         // Device needs reset
-//         if (device_status & 0x40) {
-//             print_error_to_serial("=== Driver: device needs reset ===\n");
-//             init_virtio_console();
-//             return;
-//         }
-//     }
-
-//     mmio_write8(device_mmio_base, REG_INTERRUPT_ACK, interrupt_status);
-}
-
-__attribute__((naked))
-static void handle_interrupt_asm() {
-    asm volatile (
-        "pusha\n"   // Save all registers
-        "call handle_interrupt\n"   // Call C handler
-        "movb $0x20, %al\n"    // Send end-of-interupt to programmable interrupt controller
-        "outb %al, $0x20\n"
-        "popa\n" // Restore registers
-        "iret\n" // Return from interrupt
-        );
-}
-
 __attribute__((always_inline))
 static inline void virtq_add_desc(
     uint16_t desc_idx, uint32_t addr, uint32_t len, uint16_t flags, uint16_t next
@@ -279,24 +226,6 @@ static inline void virtq_add_desc(
     mmio_write32(0, desc_entry_addr+8, len);
     mmio_write16(0, desc_entry_addr+12, flags);
     mmio_write16(0, desc_entry_addr+14, next);
-}
-
-__attribute__((always_inline)) 
-static inline void init_interrupts() {
-    // uint32_t handler_addr = (uint32_t) handle_interrupt_asm;
-
-    // idt[33].offset_low = handler_addr & 0xFFFF;
-    // idt[33].offset_high = (handler_addr >> 16) & 0xFFFF;
-    // idt[33].selector = 0x08;            // Code segment selector
-    // idt[33].type_attributes = 0x8E;     // // Present, DPL=0, 32-bit interrupt gate
-    // idt[33].zero = 0;
-
-    // idtr.offset = (uint32_t) idt;
-    // idtr.size = sizeof(idt) - 1;
-
-    // asm volatile ("lidt %0" : : "m"(idtr));
-
-    // asm volatile ("sti");
 }
 
 __attribute__((always_inline))
@@ -343,13 +272,11 @@ static inline void print_async(char* str) {
 }
 
 int main() {
-    // init_interrupts();
+    init_virtio_console();
 
-    // init_virtio_console();
+    print_sync("Hello World!\n");
 
-    // print_sync("Hello World!\n");
-
-    // close_virtio_console();
+    close_virtio_console();
 
     while (1) asm("hlt");
 }

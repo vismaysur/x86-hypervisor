@@ -1,61 +1,55 @@
 #include "virtio_console.h"
 #include "helpers.h"
 #include "virtio_control_regs.h"
-#include <errno.h>
 #include <linux/kvm.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
 
-// Host offered features
-// BIT(0) = VIRTIO_CONSOLE_F_SIZE
-// BIT(32) = VIRTIO_F_VERSION_1
-// BIT(35) = VIRTIO_F_IN_ORDER
-uint64_t device_features = (1ULL << 0) | (1ULL << 32) | (1ULL << 35); 
-// Select lower (0) or upper (1) bits of features for subsequent ops
-uint8_t  device_features_sel = 0;
-
-// Guest accepted features; initialized to 0
-uint64_t driver_features = 0;
-// Select lower (0) or upper (1) bits of features for subsequent ops
-uint8_t  driver_features_sel = 0;
-
-// Device status register
-uint8_t device_status = 0;
-
-// Interrupt status register
-uint8_t interrupt_status = 0;
-
-// Currently selected queue index
-uint16_t queue_sel = 0;
-
-// Maximum queue size offerred by host (tuned to fit one page)
-uint16_t queue_num_max = 38;
-
-// Virtqueues used for device-guest communication
-struct virtqueue queues[2] = {0}; // 0: rx, 1: tx
-
-// Device config space
-struct console_config_space console_config = {
-    .cols = 80,
-    .rows = 24
+struct console_device device = {
+    // Host offered features
+    // BIT(0) = VIRTIO_CONSOLE_F_SIZE
+    // BIT(32) = VIRTIO_F_VERSION_1
+    // BIT(35) = VIRTIO_F_IN_ORDER
+    .device_features = (1ULL << 0) | (1ULL << 32) | (1ULL << 35),
+    // Select lower (0) or upper (1) bits of features for subsequent ops
+    .device_features_sel = 0,
+    // Guest accepted features; initialized to 0
+    .driver_features = 0,
+    // Select lower (0) or upper (1) bits of features for subsequent ops
+    .driver_features_sel = 0,
+    // Device status register
+    .device_status = 0,
+    // Interrupt status register
+    .interrupt_status = 0,
+    // Currently selected queue index
+    .queue_sel = 0,
+    // Maximum queue size offerred by host (tuned to fit one page)
+    .queue_num_max = 38,
+    // Virtqueues used for device-guest communication
+    .queues = {{0}},
+    // Device config space
+    .console_config = {
+        .cols = 80,
+        .rows = 24,
+    }
 };
 
-// Manually injects interrupt into VM
-static inline int inject_interrupt_manual(int vcpufd, uint32_t irq_number) {
-    struct kvm_interrupt irq = {
-        .irq = irq_number
-    };
+// // Manually injects interrupt into VM
+// static inline int inject_interrupt_manual(int vcpufd, uint32_t irq_number) {
+//     struct kvm_interrupt irq = {
+//         .irq = irq_number
+//     };
 
-    int ret = ioctl(vcpufd, KVM_INTERRUPT, &irq);
-    if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
-        return 1;
-    }
+//     int ret = ioctl(vcpufd, KVM_INTERRUPT, &irq);
+//     if (ret == -1) {
+//         fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+//         return 1;
+//     }
 
-    return 0;
-}
+//     return 0;
+// }
 
 // Convert guest "physical" address to host virtual address
 static inline void* guest_to_host_va(uint32_t ptr) {
@@ -74,13 +68,13 @@ static inline void initialize_used_ring(void* ring_addr) {
 // Virtqueue is done in kernel-space (Vhost)
 // Userspace func kept here for benchmarking.
 static inline void walk_used_vring(uint8_t selected_queue, int vcpufd) {    
-    char* avail_base = (char *) guest_to_host_va(queues[selected_queue].avail_addr);
+    char* avail_base = (char *) guest_to_host_va(device.queues[selected_queue].avail_addr);
     uint16_t avail_idx = *(uint16_t*)(avail_base + 2);
 
-    char* used_base = (char *) guest_to_host_va(queues[selected_queue].used_addr);
+    char* used_base = (char *) guest_to_host_va(device.queues[selected_queue].used_addr);
     uint16_t used_idx = *(uint16_t*)(used_base + 2);
 
-    char* desc_base = (char *) guest_to_host_va(queues[selected_queue].desc_addr);
+    char* desc_base = (char *) guest_to_host_va(device.queues[selected_queue].desc_addr);
     
     while (used_idx != avail_idx) {
         uint16_t* avail_ring_entry = (uint16_t *) (avail_base + 4 + 2 * used_idx);
@@ -97,13 +91,13 @@ static inline void walk_used_vring(uint8_t selected_queue, int vcpufd) {
         // EMULATE CONSOLE!!
         printf("%.*s", len, buffer_addr);         
 
-        used_idx = (used_idx + 1) % queues[selected_queue].num;
+        used_idx = (used_idx + 1) % device.queues[selected_queue].num;
     }
 
     // update used_idx to reflect walked used vring entries
     *(uint16_t*)(used_base + 2) = used_idx;
 
-    interrupt_status |= 1;
+    device.interrupt_status |= 1;
     // inject_interrupt_manual(vcpufd, 33);
 }
 
@@ -127,19 +121,19 @@ void handle_mmio_read(uint64_t address, unsigned char* data, int len, int vcpufd
             break;
         }
         case REG_STATUS: {
-            memcpy(data, &device_status, len);
+            memcpy(data, &device.device_status, len);
             break;
         }
         case REG_DEVICE_FEATURES: {
-            memcpy(data, (char*) &device_features + 4 * device_features_sel, len);
+            memcpy(data, (char*) &device.device_features + 4 * device.device_features_sel, len);
             break;
         }
         case REG_QUEUE_NUM_MAX: {
-            memcpy(data, &queue_num_max, len);
+            memcpy(data, &device.queue_num_max, len);
             break;
         }
         case REG_QUEUE_READY: {
-            memcpy(data, &queues[queue_sel].queue_ready, len);
+            memcpy(data, &device.queues[device.queue_sel].queue_ready, len);
             break;
         }
         default:
@@ -157,15 +151,15 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpuf
 
             if (value_written == 0) { // Entire status register is zeroed
                 printf(DEBUG_COLOR "=== Resetting VirtIO console device ===\n" RESET_COLOR);
-                driver_features = 0;
-                device_status = 0;
-                interrupt_status = 0;
-                queue_sel = 0;
+                device.driver_features = 0;
+                device.device_status = 0;
+                device.interrupt_status = 0;
+                device.queue_sel = 0;
             } else {
-                uint8_t prev_status = device_status;
-                device_status = value_written;
+                uint8_t prev_status = device.device_status;
+                device.device_status = value_written;
                 
-                uint8_t bit_changed = device_status ^ prev_status;
+                uint8_t bit_changed = device.device_status ^ prev_status;
 
                 switch (bit_changed) {
                     case 1: // ACKNOWLEDGE (1 ~= BIT 0)
@@ -177,8 +171,8 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpuf
                     case 4: { // DRIVER_OK (4 ~= BIT 2)
                         printf(DEBUG_COLOR "=== Driver is set up; console device is live ===\n" RESET_COLOR);
                         // If DRIVER_OK is set, after it sets DEVICE_NEEDS_RESET, the device MUST send a device configuration change notification to the driver.
-                        if (device_status & (1 << 6)) {
-                            interrupt_status |= (1 << 1);
+                        if (device.device_status & (1 << 6)) {
+                            device.interrupt_status |= (1 << 1);
                             // inject_interrupt_manual(vcpufd, 33);
                         }
                         break;
@@ -186,13 +180,13 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpuf
                     // Driver has read device_features, and set its own bits in driver_features
                     // to request features; device must now enforce feature request correctness.
                     case 8: { // FEATURES_OK (8 ~= BIT 3)
-                        if (driver_features & (~device_features)) {
+                        if (device.driver_features & (~device.device_features)) {
                             printf(DEBUG_COLOR "=== Feature negotation failed (driver requested unsupported features) ===\n" RESET_COLOR);
-                            device_status &= ~8;
+                            device.device_status &= ~8;
                         }
-                        else if (device_features != driver_features) {
+                        else if (device.device_features != device.driver_features) {
                             printf(DEBUG_COLOR "=== Feature negotiation failed (driver doesn't recognize a mandatory feature) ===\n" RESET_COLOR);
-                            device_status &= ~8;
+                            device.device_status &= ~8;
                         } else {
                             printf(DEBUG_COLOR "=== Driver has acknowledged recognizable features; feature negotiation complete ===\n" RESET_COLOR);
                         }
@@ -214,49 +208,49 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpuf
 
             // The device MUST NOT consume buffers or send any used buffer notifications 
             // to the driver before DRIVER_OK.
-            if (!(device_status & 4)) return;
+            if (!(device.device_status & 4)) return;
 
             uint8_t queue_sel;
             memcpy(&queue_sel, data, len);
 
             // Devices for which QueueReady is set to 0 must not be active.
-            if (!queues[queue_sel].queue_ready) return;
+            if (!device.queues[queue_sel].queue_ready) return;
 
             walk_used_vring(queue_sel, vcpufd);
             break;
         }
         case REG_DEVICE_FEATURES_SEL: {
-            memcpy(&device_features_sel, data, len);
+            memcpy(&device.device_features_sel, data, len);
             break;
         }
         case REG_DRIVER_FEATURES: {
-            memcpy((char*) &driver_features + 4 * driver_features_sel, data, len);
+            memcpy((char*) &device.driver_features + 4 * device.driver_features_sel, data, len);
             break;
         }
         case REG_DRIVER_FEATURES_SEL: {
-            memcpy(&driver_features_sel, data, len);
+            memcpy(&device.driver_features_sel, data, len);
             break;
         }
         case REG_QUEUE_SEL: {
-            memcpy(&queue_sel, data, len);
+            memcpy(&device.queue_sel, data, len);
             break;
         }
         case REG_QUEUE_NUM: {
-            memcpy(&queues[queue_sel].num, data, len);
+            memcpy(&device.queues[device.queue_sel].num, data, len);
             break;
         }
         case REG_QUEUE_DESC_LOW: {
-            memcpy(&queues[queue_sel].desc_addr, data, len);
+            memcpy(&device.queues[device.queue_sel].desc_addr, data, len);
             break;
         }
         case REG_QUEUE_DRIVER_LOW: {
-            memcpy(&queues[queue_sel].avail_addr, data, len);
+            memcpy(&device.queues[device.queue_sel].avail_addr, data, len);
             break;
         }
         case REG_QUEUE_DEVICE_LOW: {
-            memcpy(&queues[queue_sel].used_addr, data, len);
+            memcpy(&device.queues[device.queue_sel].used_addr, data, len);
             // host is responsible for properly setting up the virtqueue used rings.
-            void* used_ring = guest_to_host_va(queues[queue_sel].used_addr);
+            void* used_ring = guest_to_host_va(device.queues[device.queue_sel].used_addr);
             initialize_used_ring(used_ring);
             break;
         }
@@ -266,13 +260,13 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpuf
         case REG_QUEUE_DEVICE_HIGH:
             break;
         case REG_QUEUE_READY: {
-            memcpy(&queues[queue_sel].queue_ready, data, len);
+            memcpy(&device.queues[device.queue_sel].queue_ready, data, len);
             break;
         }
         case REG_INTERRUPT_ACK: {
             uint8_t interrupt_acked;
             memcpy(&interrupt_acked, data, len);
-            interrupt_status ^= interrupt_acked;
+            device.interrupt_status ^= interrupt_acked;
             break;
         }
         default:

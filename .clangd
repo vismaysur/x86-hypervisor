@@ -2,3 +2,9 @@ CompileFlags:
   Add:
     - -I~/linux-5.15.165/include
     - -I~/linux-5.15.165/arch/x86/include
+  Remove:
+    - -mpreferred-stack-boundary=3
+    - -mindirect-branch=thunk-extern
+    - -mindirect-branch-register
+    - -fno-allow-store-data-races
+    - -fconserve-stack

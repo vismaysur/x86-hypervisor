@@ -50,14 +50,14 @@ static inline void initialize_used_ring(void* ring_addr) {
     *((char*) ring_addr + 16) = 0;
 }
 
-static inline void walk_used_vring() {    
-    char* avail_base = (char *) guest_to_host_va(queues[queue_sel].avail_addr);
+static inline void walk_used_vring(uint8_t selected_queue) {    
+    char* avail_base = (char *) guest_to_host_va(queues[selected_queue].avail_addr);
     uint16_t avail_idx = *(uint16_t*)(avail_base + 2);
 
-    char* used_base = (char *) guest_to_host_va(queues[queue_sel].used_addr);
+    char* used_base = (char *) guest_to_host_va(queues[selected_queue].used_addr);
     uint16_t used_idx = *(uint16_t*)(used_base + 2);
 
-    char* desc_base = (char *) guest_to_host_va(queues[queue_sel].desc_addr);
+    char* desc_base = (char *) guest_to_host_va(queues[selected_queue].desc_addr);
     
     while (used_idx != avail_idx) {
         uint16_t* avail_ring_entry = (uint16_t *) (avail_base + 4 + 2 * used_idx);
@@ -74,11 +74,13 @@ static inline void walk_used_vring() {
         // EMULATE CONSOLE!!
         printf("%.*s", len, buffer_addr);         
 
-        used_idx = (used_idx + 1) % queues[queue_sel].num;
+        used_idx = (used_idx + 1) % queues[selected_queue].num;
     }
 
     // update used_idx to reflect walked used vring entries
     *(uint16_t*)(used_base + 2) = used_idx;
+
+    // TODO: send used buffer notification
 }
 
 // Handler for KVM_EXIT_MMIO: driver read from memory mapped control registers belonging 
@@ -110,6 +112,10 @@ void handle_mmio_read(uint64_t address, unsigned char* data, int len) {
         }
         case REG_QUEUE_NUM_MAX: {
             memcpy(data, &queue_num_max, len);
+            break;
+        }
+        case REG_QUEUE_READY: {
+            memcpy(data, &queues[queue_sel].queue_ready, len);
             break;
         }
         default:
@@ -144,9 +150,14 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len) {
                     case 2: // DRIVER (2 ~= BIT 1)
                         printf(DEBUG_COLOR "=== Guest OS knows how to drive device ===\n" RESET_COLOR);
                         break;
-                    case 4: // DRIVER_OK (4 ~= BIT 2)
+                    case 4: { // DRIVER_OK (4 ~= BIT 2)
                         printf(DEBUG_COLOR "=== Driver is set up; console device is live ===\n" RESET_COLOR);
+                        // If DRIVER_OK is set, after it sets DEVICE_NEEDS_RESET, the device MUST send a device configuration change notification to the driver.
+                        if (device_status & (1 << 6)) {
+                            // TODO: send device config change notification
+                        }
                         break;
+                    }
                     // Driver has read device_features, and set its own bits in driver_features
                     // to request features; device must now enforce feature request correctness.
                     case 8: { // FEATURES_OK (8 ~= BIT 3)
@@ -155,11 +166,15 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len) {
                             device_status &= ~8;
                         }
                         else if (device_features != driver_features) {
-                            printf(DEBUG_COLOR "=== Feature negotiation failed (driver doesn't recognize mandatory features) ===\n" RESET_COLOR);
+                            printf(DEBUG_COLOR "=== Feature negotiation failed (driver doesn't recognize a mandatory feature) ===\n" RESET_COLOR);
                             device_status &= ~8;
                         } else {
                             printf(DEBUG_COLOR "=== Driver has acknowledged recognizable features; feature negotiation complete ===\n" RESET_COLOR);
                         }
+                        break;
+                    }
+                    case 128: { // FAILED (128 ~= BIT 7)
+                        printf(DEBUG_COLOR "=== Device initialization failed ===\n" RESET_COLOR);
                         break;
                     }
                     default:
@@ -169,7 +184,17 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len) {
             break;
         }
         case REG_QUEUE_NOTIFY: {
-            walk_used_vring();
+            // The device MUST NOT consume buffers or send any used buffer notifications 
+            // to the driver before DRIVER_OK.
+            if (!(device_status & 4)) return;
+
+            uint8_t queue_sel;
+            memcpy(&queue_sel, data, len);
+
+            // Devices for which QueueReady is set to 0 must not be active.
+            if (!queues[queue_sel].queue_ready) return;
+
+            walk_used_vring(queue_sel);
             break;
         }
         case REG_DEVICE_FEATURES_SEL: {
@@ -211,6 +236,9 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len) {
         case REG_QUEUE_DESC_HIGH:
         case REG_QUEUE_DRIVER_HIGH:
         case REG_QUEUE_DEVICE_HIGH:
+            break;
+        case REG_QUEUE_READY:
+            memcpy(&queues[queue_sel].queue_ready, data, len);
             break;
         default:
             fprintf(stderr, ERROR_COLOR "[Error: doesn't handle MMIO read @ 0x%lx, of size %d]\n" RESET_COLOR, address, len);

@@ -60,6 +60,7 @@ struct virtqueue {
     uint64_t avail_addr;
     uint64_t used_addr;
     uint16_t num;
+    uint8_t queue_ready;
 };
 
 // Virtqueues used for device-guest communication

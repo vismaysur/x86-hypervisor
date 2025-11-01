@@ -259,9 +259,10 @@ int main() {
                 if (run->io.direction == KVM_EXIT_IO_OUT && 
                     run->io.size == 1 &&
                     run->io.port == 0x3f8 &&
-                    run->io.count == 1)
-                    putchar(*((char *) run + run->io.data_offset));
-                else
+                    run->io.count == 1) {
+                    char* serial_msg = ((char *) run + run->io.data_offset);
+                    fprintf(stderr, ERROR_COLOR "%s" RESET_COLOR, serial_msg);
+                } else
                     fprintf(stderr, ERROR_COLOR "[unhandled KVM_EXIT_IO]\n" RESET_COLOR);
                 break;
             }

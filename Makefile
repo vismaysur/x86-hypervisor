@@ -4,7 +4,7 @@ INCLUDE_DIR := $(PWD)/include
 
 obj-m := vhost_console.o
 vhost_console-objs := src/vhost_console.o
-ccflags-y := -Wall
+ccflags-y := -Wall -I$(INCLUDE_DIR)
 
 .PHONY: clean
 

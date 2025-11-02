@@ -1,11 +1,13 @@
 #include "virtio_console.h"
 #include "helpers.h"
 #include "virtio_control_regs.h"
+#include <errno.h>
 #include <linux/kvm.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include "vhost_console.h"
 
 struct console_device device = {
     // Host offered features
@@ -67,7 +69,7 @@ static inline void initialize_used_ring(void* ring_addr) {
 
 // Virtqueue is done in kernel-space (Vhost)
 // Userspace func kept here for benchmarking.
-static inline void walk_used_vring(uint8_t selected_queue, int vcpufd) {    
+static inline void walk_used_vring(uint8_t selected_queue, int vcpufd, int outputfd) {    
     char* avail_base = (char *) guest_to_host_va(device.queues[selected_queue].avail_addr);
     uint16_t avail_idx = *(uint16_t*)(avail_base + 2);
 
@@ -89,7 +91,7 @@ static inline void walk_used_vring(uint8_t selected_queue, int vcpufd) {
         char* buffer_addr = guest_to_host_va(addr);
 
         // EMULATE CONSOLE!!
-        printf("%.*s", len, buffer_addr);         
+        dprintf(outputfd, "%.*s", len, buffer_addr);         
 
         used_idx = (used_idx + 1) % device.queues[selected_queue].num;
     }
@@ -103,7 +105,7 @@ static inline void walk_used_vring(uint8_t selected_queue, int vcpufd) {
 
 // Handler for KVM_EXIT_MMIO: driver read from memory mapped control registers belonging 
 // to VirtIO console device).
-void handle_mmio_read(uint64_t address, unsigned char* data, int len, int vcpufd) {
+void handle_mmio_read(uint64_t address, unsigned char* data, int len, int vcpufd, struct vhost_state* state) {
     switch (address - VIRTIO_MMIO_BASE) {
         case REG_MAGIC: {
             uint32_t magicnum = MAGIC_NUMBER;
@@ -143,7 +145,7 @@ void handle_mmio_read(uint64_t address, unsigned char* data, int len, int vcpufd
 
 // Handler for KVM_EXIT_MMIO: driver wrote to memory mapped control registers belonging 
 // to VirtIO console device).
-void handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd) {
+int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd, struct vhost_state* state, int output_fd) {
    switch (address - VIRTIO_MMIO_BASE) {
         case REG_STATUS: {
             uint8_t value_written;
@@ -208,15 +210,15 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpuf
 
             // The device MUST NOT consume buffers or send any used buffer notifications 
             // to the driver before DRIVER_OK.
-            if (!(device.device_status & 4)) return;
+            if (!(device.device_status & 4)) return 0;
 
             uint8_t queue_sel;
             memcpy(&queue_sel, data, len);
 
             // Devices for which QueueReady is set to 0 must not be active.
-            if (!device.queues[queue_sel].queue_ready) return;
+            if (!device.queues[queue_sel].queue_ready) return 0;
 
-            walk_used_vring(queue_sel, vcpufd);
+            walk_used_vring(queue_sel, vcpufd, output_fd);
             break;
         }
         case REG_DEVICE_FEATURES_SEL: {
@@ -261,6 +263,71 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpuf
             break;
         case REG_QUEUE_READY: {
             memcpy(&device.queues[device.queue_sel].queue_ready, data, len);
+            
+            // Activate queue in kernel space if vhost acceleration is enabled
+            if (device.queues[device.queue_sel].queue_ready && state->vhostfd != -1) {
+                int ret;
+
+                struct vhost_vring_state vring_state = {
+                    .queue_sel = device.queue_sel,
+                    .num = device.queues[device.queue_sel].num
+                };
+
+                ret = ioctl(state->vhostfd, VHOST_SET_VRING_NUM, &vring_state);
+                if (ret == -1) {
+                    fprintf(
+                        stderr, 
+                        "VHOST_SET_VRING_NUM ioctl() failed: %s\n", 
+                        strerror(errno)
+                    );
+                    return 1;
+                }
+
+                struct vhost_vring_addr addr = {
+                    .queue_sel = device.queue_sel,
+                    .desc_addr = device.queues[device.queue_sel].desc_addr,
+                    .avail_addr = device.queues[device.queue_sel].avail_addr,
+                    .used_addr = device.queues[device.queue_sel].used_addr
+                };
+
+                ret = ioctl(state->vhostfd, VHOST_SET_VRING_ADDR, &addr);
+                if (ret == -1) {
+                    fprintf(
+                        stderr,
+                        "VHOST_SET_VRING_ADDR ioctl() failed: %s\n",
+                        strerror(errno)
+                    );
+                    return 1;
+                }
+
+                struct vhost_vring_fd file = {
+                    .queue_sel = device.queue_sel,
+                    .fd = output_fd,
+                };
+
+                ret = ioctl(state->vhostfd, VHOST_SET_OUTPUT_FD, &file);
+                if (ret == -1) {
+                    fprintf(
+                        stderr,
+                        "VHOST_SET_OUTPUT_FD ioctl() failed: %s\n",
+                        strerror(errno)
+                    );
+                    return 1;
+                }
+
+                file.queue_sel = device.queue_sel;
+                file.fd = state->kick_efd;
+
+                ret = ioctl(state->vhostfd, VHOST_SET_VRING_KICK, &file);
+                if (ret == -1) {
+                    fprintf(
+                        stderr,
+                        "VHOST_SET_VRING_KICK ioctl() failed: %s\n",
+                        strerror(errno)
+                    );
+                    return 1;
+                }
+            }
             break;
         }
         case REG_INTERRUPT_ACK: {
@@ -272,4 +339,6 @@ void handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpuf
         default:
             fprintf(stderr, ERROR_COLOR "[Error: doesn't handle MMIO read @ 0x%lx, of size %d]\n" RESET_COLOR, address, len);
     }
+
+    return 0;
 }

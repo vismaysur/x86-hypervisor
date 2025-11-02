@@ -1,6 +1,7 @@
 #ifndef VIRTIO_CONSOLE_H
 #define VIRTIO_CONSOLE_H
 
+#include "vhost_console.h"
 #include <stdint.h>
 
 #define VIRTIO_MMIO_BASE        0x10000000ULL
@@ -9,6 +10,26 @@
 #define MAGIC_NUMBER            0x74726976
 #define DEVICE_VERSION_NUMBER   0x2
 #define DEVICE_ID               0x3
+
+// Used for VHOST_SET_VRING_NUM ioctl
+struct vhost_vring_state {
+    uint16_t queue_sel;
+    uint16_t num;
+};
+
+// Used for VHOST_SET_VRING_ADDR ioctl
+struct vhost_vring_addr {
+    uint16_t queue_sel;
+    uint64_t desc_addr;
+    uint64_t avail_addr;
+    uint64_t used_addr;
+};
+
+// Used for VHOST_SET_VRING_KICK ioctl
+struct vhost_vring_fd {
+    uint16_t queue_sel;
+    int      fd;
+};
 
 // Virtqueue used for guest-device communication
 struct virtqueue {
@@ -58,10 +79,10 @@ extern void* guest_physical_mem_base;
 
 // Handler for KVM_EXIT_MMIO: driver read from memory mapped control registers belonging 
 // to VirtIO console device).
-void handle_mmio_read(uint64_t address, unsigned char* data, int len, int vcpufd);
+void handle_mmio_read(uint64_t address, unsigned char* data, int len, int vcpufd, struct vhost_state* state);
 
 // Handler for KVM_EXIT_MMIO: driver wrote to memory mapped control registers belonging 
 // to VirtIO console device).
-void handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd);
+int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd, struct vhost_state* state, int output_fd);
 
 #endif

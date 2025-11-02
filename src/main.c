@@ -8,11 +8,14 @@
 #include <string.h>
 #include <stdio.h>
 #include <sys/mman.h>
+#include <sys/eventfd.h>
 #include <unistd.h>
 #include <stdbool.h>
 
+#include "vhost_console.h"
 #include "virtio_console.h"
 #include "helpers.h"
+#include "virtio_control_regs.h"
 
 #define PAGE_SIZE           getpagesize()
 #define GUEST_MEM_SIZE      0x10000000ULL
@@ -165,12 +168,78 @@ static inline int setup_memory_region(int guestcode_fd, int vmfd, void** guest_m
     return 0;
 }
 
+static inline int setup_vhost(int vmfd, int vcpufd, struct vhost_state* state, int output_fd) {
+    int vhostfd, kick_efd, ret;
+
+    vhostfd = open("/dev/vhost-console", O_RDWR);
+    if (vhostfd == -1) {
+        fprintf(stderr, ERROR_COLOR "open(): %s\n" RESET_COLOR, strerror(errno));
+        return 1;
+    }
+
+    kick_efd = eventfd(1, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (kick_efd == -1) {
+        fprintf(stderr, ERROR_COLOR "eventfd(): %s\n" RESET_COLOR, strerror(errno));
+        return 1;
+    }
+
+    struct kvm_ioeventfd fd = {
+        .datamatch = 1,
+        .len = 2,
+        .fd = kick_efd,
+        .addr = VIRTIO_MMIO_BASE + REG_QUEUE_NOTIFY,
+        .flags = KVM_IOEVENTFD_FLAG_DATAMATCH,
+    };
+
+    ret = ioctl(vmfd, KVM_IOEVENTFD, &fd);
+    if (ret == -1) {
+        fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+        return 1;
+    }
+
+    state->vhostfd = vhostfd;
+    state->kick_efd = kick_efd;
+
+    ret = ioctl(vhostfd, VHOST_SET_OWNER, NULL);
+    if (ret == -1) {
+        fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+        return 1;
+    }
+
+    return 0;
+}
+
+static inline int close_vhost(struct vhost_state* state) {
+    if (state->vhostfd == -1) return 0;
+
+    int ret = close(state->vhostfd);
+    if (ret == -1) {
+        fprintf(stderr, ERROR_COLOR "close(): %s\n" RESET_COLOR, strerror(errno));
+        return 1;
+    }
+
+    return 0;
+}
+
 int main() {
     int kvm, ret, vmfd, vcpufd, guestcode_fd;
     void *guest_mem;
     struct kvm_run* run;
     size_t kvm_run_mmap_size;
+    int output_fd;
     bool halted;
+
+    struct vhost_state state = {
+        .vhostfd = -1,
+        .kick_efd = -1
+    };
+
+    // emulate console device using console_output.txt file
+    output_fd = open("/dev/vmm-console", O_WRONLY | O_CREAT | O_TRUNC);
+    if (output_fd == -1) {
+        fprintf(stderr, ERROR_COLOR "open(): %s\n" RESET_COLOR, strerror(errno));
+        return 1;
+    } 
 
     // user logged in at console must be part of kvm group to access /dev/kvm
     kvm = open("/dev/kvm", O_RDWR | O_CLOEXEC);
@@ -237,6 +306,9 @@ int main() {
     // set up VCPU regs initial state
     if ((ret = setup_registers(vcpufd))) return ret;
 
+    // set up vhost-console device
+    if ((ret = setup_vhost(vmfd, vcpufd, &state, output_fd))) return ret;
+
     halted = false;
 
     while (1) {
@@ -275,10 +347,20 @@ int main() {
                     break;
                 }
 
+                // Ignore writes to QueueNotify if vhost enabled
+                if (
+                    state.vhostfd != -1 && 
+                    run->mmio.phys_addr == VIRTIO_MMIO_BASE + REG_QUEUE_NOTIFY && 
+                    *run->mmio.data == 1 && 
+                    run->mmio.len == 2
+                ) {
+                    break;
+                }
+
                 if (run->mmio.is_write) 
-                    handle_mmio_write(run->mmio.phys_addr, run->mmio.data, run->mmio.len, vcpufd);
+                    handle_mmio_write(run->mmio.phys_addr, run->mmio.data, run->mmio.len, vcpufd, &state, output_fd);
                 else 
-                    handle_mmio_read(run->mmio.phys_addr, run->mmio.data, run->mmio.len, vcpufd);
+                    handle_mmio_read(run->mmio.phys_addr, run->mmio.data, run->mmio.len, vcpufd, &state);
                 
                 break;
             }
@@ -312,24 +394,27 @@ int main() {
         if (halted) break;
     }
 
+    // close vhost-console device
+    if ((ret = close_vhost(&state))) return ret;
+
     // release memory page allocated for guest VM's memory
     ret = munmap(guest_mem, PAGE_SIZE * 5);
-     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "munmap(): %s\n" RESET_COLOR, strerror(errno));
+    if (ret == -1) {
+        fprintf(stderr, ERROR_COLOR "munmap(): %s\n", strerror(errno));
         return 1;
     } 
 
     // release memory allocated for kvm_run structure to track VM VCPU state
     ret = munmap(run, kvm_run_mmap_size);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "munmap(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr, ERROR_COLOR "munmap(): %s\n", strerror(errno));
         return 1;
     } 
 
     // close /dev/kvm device file
     ret = close(kvm);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "close(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr, ERROR_COLOR "close(): %s\n", strerror(errno));
         return 1;
     }
 

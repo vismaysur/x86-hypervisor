@@ -262,11 +262,6 @@ static inline void print_to_console(char* str) {
 }
 
 __attribute__((always_inline))
-static inline void print_sync(char* str) {
-    print_to_console(str);
-}
-
-__attribute__((always_inline))
 static inline void print_async(char* str) {
     print_to_console(str);
 }
@@ -274,7 +269,7 @@ static inline void print_async(char* str) {
 int main() {
     init_virtio_console();
 
-    print_sync("Hello World!\n");
+    print_async("Hello World!\n");
 
     close_virtio_console();
 

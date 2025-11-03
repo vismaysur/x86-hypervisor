@@ -103,7 +103,11 @@ static inline void walk_used_vring(uint8_t selected_queue, int vcpufd, int outpu
         char* buffer_addr = guest_to_host_va(addr);
 
         /* EMULATE CONSOLE!! */
-        dprintf(outputfd, "%.*s", len, buffer_addr);         
+        dprintf(outputfd, "%.*s", len, buffer_addr); 
+        
+        /* Write used entry */
+        *(uint32_t*)(used_base + 4 + (used_idx % device.queues[selected_queue].num) * 2) = desc_idx; // id
+        *(uint32_t*)(used_base + 4 + (used_idx % device.queues[selected_queue].num) * 2) = len;      // len
 
         used_idx++;
     }

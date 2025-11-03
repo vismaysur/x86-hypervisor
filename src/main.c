@@ -152,6 +152,7 @@ static inline int setup_memory_region(int guestcode_fd, int vmfd, void** guest_m
     ret = read(guestcode_fd, code, guestcode_size);
     if (ret == -1) {
         fprintf(stderr,  "read(): %s\n" , strerror(errno));
+        free(code);
         return 1; 
     }
 
@@ -159,6 +160,7 @@ static inline int setup_memory_region(int guestcode_fd, int vmfd, void** guest_m
     guest_physical_mem = mmap(NULL, PAGE_SIZE * 5, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0); 
     if (guest_physical_mem == (void*) -1) {
         fprintf(stderr,  "mmap(): %s\n" , strerror(errno));
+        free(code);
         return 1;
     }
 
@@ -183,6 +185,7 @@ static inline int setup_memory_region(int guestcode_fd, int vmfd, void** guest_m
     ret = ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &memregion);
     if (ret == -1) {
         fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
+        munmap(guest_physical_mem, PAGE_SIZE * 5);
         return 1;
     }
 
@@ -217,6 +220,7 @@ static inline int setup_vhost(int vmfd, int vcpufd, struct vhost_state* state, i
     kick_efd = eventfd(1, EFD_CLOEXEC);
     if (kick_efd == -1) {
         fprintf(stderr,  "eventfd(): %s\n" , strerror(errno));
+        close(vhostfd);
         return 1;
     }
 
@@ -231,6 +235,8 @@ static inline int setup_vhost(int vmfd, int vcpufd, struct vhost_state* state, i
     ret = ioctl(vmfd, KVM_IOEVENTFD, &fd);
     if (ret == -1) {
         fprintf(stderr,  "ioctl(KVM_IOEVENTFD): %s\n" , strerror(errno));
+        close(vhostfd);
+        close(kick_efd);
         return 1;
     }
 
@@ -246,6 +252,8 @@ static inline int setup_vhost(int vmfd, int vcpufd, struct vhost_state* state, i
     ret = ioctl(vhostfd, VHOST_SET_OWNER, NULL);
     if (ret == -1) {
         fprintf(stderr,  "ioctl(VHOST_SET_OWNER): %s\n" , strerror(errno));
+        close(vhostfd);
+        close(kick_efd);
         return 1;
     }
 
@@ -258,6 +266,8 @@ static inline int setup_vhost(int vmfd, int vcpufd, struct vhost_state* state, i
     ret = ioctl(vhostfd, VHOST_SET_OUTPUT_FD, &output_fd_data);
     if (ret == -1) {
         fprintf(stderr, "ioctl(VHOST_SET_OUTPUT_FD): %s\n", strerror(errno));
+        close(vhostfd);
+        close(kick_efd);
         return 1;
     }
 
@@ -275,6 +285,9 @@ static inline int setup_vhost(int vmfd, int vcpufd, struct vhost_state* state, i
     ret = ioctl(vhostfd, VHOST_SET_MEMTABLE, &mt);
     if (ret == -1) {
         fprintf(stderr, "ioctl(VHOST_SET_MEMTABLE): %s\n", strerror(errno));
+        close(vhostfd);
+        close(kick_efd);
+        return 1;
     }
 
     return 0;
@@ -284,13 +297,19 @@ static inline int setup_vhost(int vmfd, int vcpufd, struct vhost_state* state, i
  * Releases all resources acquired to track /dev/vhost-console state.
  */
 static inline int close_vhost(struct vhost_state* state) {
+    int ret;
+
     if (state->vhostfd == -1) return 0;
 
     if (state->kick_efd != -1) {
-        close(state->kick_efd);
+        ret = close(state->kick_efd);
+        if (ret == -1) {
+            fprintf(stderr,  "close(): %s\n" , strerror(errno));
+            return 1;
+        }
     }
 
-    int ret = close(state->vhostfd);
+    ret = close(state->vhostfd);
     if (ret == -1) {
         fprintf(stderr,  "close(): %s\n" , strerror(errno));
         return 1;
@@ -355,6 +374,7 @@ int main(int argc, char* argv[]) {
     kvm = open("/dev/kvm", O_RDWR | O_CLOEXEC);
     if (kvm == -1) {
         fprintf(stderr,  "open(): %s\n" , strerror(errno));
+        close(output_fd);
         return 1;
     }
 
@@ -362,11 +382,15 @@ int main(int argc, char* argv[]) {
     ret = ioctl(kvm, KVM_GET_API_VERSION, NULL);
     if (ret == -1) {
         fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
+        close(output_fd);
+        close(kvm);
         return 1;
     }
 
     if (ret != 12) {
         fprintf(stderr,  "KVM_GET_API_VERSION: %d, expected 12" , ret);
+        close(output_fd);
+        close(kvm);
         return 1;
     }
 
@@ -377,6 +401,8 @@ int main(int argc, char* argv[]) {
     vmfd = ioctl(kvm, KVM_CREATE_VM, 0);
     if (vmfd == -1) {
         fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
+        close(output_fd);
+        close(kvm);
         return 1;
     }
 
@@ -384,17 +410,28 @@ int main(int argc, char* argv[]) {
     guestcode_fd = open("build/guest.bin", O_RDONLY);
     if (guestcode_fd == -1) {
         fprintf(stderr,  "open(): %s\n" , strerror(errno));
+        close(output_fd);
+        close(kvm);
         return 1; 
     }
 
     /* Sets up VM memory region and copy guest code to it */
-    if ((ret = setup_memory_region(guestcode_fd, vmfd, &guest_mem))) return ret;
+    if ((ret = setup_memory_region(guestcode_fd, vmfd, &guest_mem))) {
+        close(output_fd);
+        close(kvm);
+        close(guestcode_fd);
+        return ret;
+    }
+
     guest_physical_mem_base = guest_mem;
 
     /* Creates virtual CPU to run code in guest physical memory. */
     vcpufd = ioctl(vmfd, KVM_CREATE_VCPU, 0);
     if (vcpufd == -1) {
         fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
+        close(output_fd);
+        close(kvm);
+        close(guestcode_fd);
         return 1;
     }
 
@@ -402,6 +439,9 @@ int main(int argc, char* argv[]) {
     kvm_run_mmap_size = ioctl(kvm, KVM_GET_VCPU_MMAP_SIZE, NULL);
     if (kvm_run_mmap_size == -1) {
         fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
+        close(output_fd);
+        close(kvm);
+        close(guestcode_fd);
         return 1;
     } 
 
@@ -412,18 +452,35 @@ int main(int argc, char* argv[]) {
     run = mmap(NULL, kvm_run_mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED, vcpufd, 0);
     if (run == (void*) -1) {
         fprintf(stderr,  "mmap(): %s\n" , strerror(errno));
+        close(output_fd);
+        close(kvm);
+        close(guestcode_fd);
         return 1;
     }
     
     /* Sets up VCPU special regs initial state */
-    if ((ret = setup_sregisters(vcpufd))) return ret;
+    if ((ret = setup_sregisters(vcpufd))) {
+        close(output_fd);
+        close(kvm);
+        close(guestcode_fd);
+        return ret;
+    }
 
     /* Sets up VCPU regs initial state */
-    if ((ret = setup_registers(vcpufd))) return ret;
+    if ((ret = setup_registers(vcpufd))) {
+        close(output_fd);
+        close(kvm);
+        close(guestcode_fd);
+        return ret;
+    }
 
     /* Sets up vhost-console device if vhost is enabled in CLI */
-    if (use_vhost && (ret = setup_vhost(vmfd, vcpufd, &state, output_fd))) 
+    if (use_vhost && (ret = setup_vhost(vmfd, vcpufd, &state, output_fd)))  {
+        close(output_fd);
+        close(kvm);
+        close(guestcode_fd);
         return ret;
+    }
 
     halted = false;
 
@@ -435,6 +492,9 @@ int main(int argc, char* argv[]) {
         ret = ioctl(vcpufd, KVM_RUN, NULL);
         if (ret == -1) {
             fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
+            close(output_fd);
+            close(kvm);
+            close(guestcode_fd);
             return 1;
         } 
 
@@ -519,8 +579,17 @@ int main(int argc, char* argv[]) {
 
     printf("\nTime taken to run VM: %lu microseconds\n", end_us - start_us);
 
+    /*
+     * Best effort resource clean-up
+     */
+
     /* Releases resources that track /dev/vhost-console device */
-    if ((ret = close_vhost(&state))) return ret;
+    if ((ret = close_vhost(&state))) {
+        close(output_fd);
+        close(kvm);
+        close(guestcode_fd);
+        return ret;
+    }
 
     /* Releases memory page allocated for guest VM's memory */
     ret = munmap(guest_mem, PAGE_SIZE * 5);
@@ -535,6 +604,20 @@ int main(int argc, char* argv[]) {
         fprintf(stderr,  "munmap(): %s\n", strerror(errno));
         return 1;
     } 
+
+    /* Closes /dev/vmm-console file */
+    ret = close(output_fd);
+    if (ret == -1) {
+        fprintf(stderr,  "close(): %s\n", strerror(errno));
+        return 1;
+    }
+
+    /* Closes guest.bin file*/
+    ret = close(guestcode_fd);
+    if (ret == -1) {
+        fprintf(stderr,  "close(): %s\n", strerror(errno));
+        return 1;
+    }
 
     /* Closes /dev/kvm device file */
     ret = close(kvm);

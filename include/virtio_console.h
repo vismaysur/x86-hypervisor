@@ -11,27 +11,48 @@
 #define DEVICE_VERSION_NUMBER   0x2
 #define DEVICE_ID               0x3
 
-/* Used for VHOST_SET_VRING_NUM ioctl */
+/* 
+ * Used for VHOST_SET_VRING_NUM ioctl 
+ * Allows hypervisor to configure number of descriptors in a virtqueue 
+ */
 struct vhost_vring_state {
-    uint16_t queue_sel;
-    uint16_t num;
+    uint16_t queue_sel;     // Virtqueue index (0 = RX, 1 = TX)
+    uint16_t num;           // Number of descriptors
 };
 
-/* Used for VHOST_SET_VRING_ADDR ioctl */
+/* 
+ * Used for VHOST_SET_VRING_ADDR ioctl 
+ * Sets physical addresses of descriptor, available, and used rings
+ */
 struct vhost_vring_addr {
-    uint16_t queue_sel;
-    uint64_t desc_addr;
-    uint64_t avail_addr;
-    uint64_t used_addr;
+    uint16_t queue_sel;     // Virtqueue index
+    uint64_t desc_addr;     // Descriptor table base
+    uint64_t avail_addr;    // Available ring base
+    uint64_t used_addr;     // Used ring base
 };
 
-/* Used for VHOST_SET_VRING_KICK ioctl */
+/* 
+ * Used for VHOST_SET_VRING_KICK ioctl 
+ * Associates an eventfd for virtqueue notifications
+ */
 struct vhost_vring_fd {
-    uint16_t queue_sel;
-    int      fd;
+    uint16_t queue_sel;     // Virtqueue index
+    int fd;                 // Eventfd file descriptor
 };
 
-/* Used for VHOST_SET_MEMTABLE ioctl */
+/* 
+ * Used for VHOST_SET_OUTPUT_FD ioctl 
+ * Provides a file descriptor to emulate console writess
+ */
+struct vhost_console_output {
+    uint16_t queue_sel;     // Virtqueue index
+    int fd;                 // Output file descriptor
+};
+
+/* 
+ * Set via VHOST_SET_MEMTABLE ioctl 
+ * Maps guest physical memory to hypervisor's address space.
+ */
 struct memtable {
     uint64_t gpa_base;              // guest physical address base
     uint64_t mem_size;              // size of mapped guest memory

@@ -62,6 +62,25 @@ struct vhost_vring_fd {
     int fd;                 // Eventfd file descriptor
 };
 
+/* 
+ * Used for VHOST_SET_OUTPUT_FD ioctl 
+ * Provides a file descriptor to emulate console writess
+ */
+struct vhost_console_output {
+    uint16_t queue_sel;     // Virtqueue index
+    int fd;                 // Output file descriptor
+};
+
+/* 
+ * Set via VHOST_SET_MEMTABLE ioctl 
+ * Maps guest physical memory to hypervisor's address space.
+ */
+struct memtable {
+    uint64_t gpa_base;              // guest physical address base
+    uint64_t mem_size;              // size of mapped guest memory
+    uint64_t userspace_guest_addr;  // address of guest memory in VMM address space
+};
+
 /* Virtqueue used for guest <-> device communication */
 struct virtqueue {
     uint64_t            desc_addr;      // Descriptor vring address
@@ -74,16 +93,6 @@ struct virtqueue {
                                            guest mmio write to QueueNotify register */
     struct file*        output_fd;      // File descriptor of file used to emulate console device
     loff_t              output_off;     // Offset of data written to file
-};
-
-/* 
- * Set via VHOST_SET_MEMTABLE ioctl 
- * Maps guest physical memory to hypervisor's address space.
- */
-struct memtable {
-    uint64_t gpa_base;              // guest physical address base
-    uint64_t mem_size;              // size of mapped guest memory
-    uint64_t userspace_guest_addr;  // address of guest memory in VMM address space
 };
 
 /*
@@ -167,6 +176,10 @@ static int process_virtqueue(uint8_t queue_num, struct console_device *device) {
             kernel_write(vq->output_fd, guest_to_host_va(addr, device), len, &vq->output_off); 
         }
 
+         /* Write used entry */
+        *(uint32_t*)(used + 4 + (used_idx % vq->num) * 2) = desc_idx; // id
+        *(uint32_t*)(used + 4 + (used_idx % vq->num) * 2) = len;      // len
+
         used_idx++;
     }
 
@@ -230,11 +243,11 @@ static int pin_and_mmap_pages(
      * increasing ref count of each page.
      */
     down_read(&mm->mmap_lock);
-    ret = get_user_pages_remote(
+    ret = pin_user_pages_remote(
         mm, 
         userspace_addr, 
         num_pages, 
-        FOLL_WRITE | FOLL_FORCE, 
+        FOLL_WRITE | FOLL_LONGTERM, 
         *pages, 
         NULL, 
         NULL
@@ -242,6 +255,8 @@ static int pin_and_mmap_pages(
     up_read(&mm->mmap_lock);
     if (ret != num_pages) {
         pr_err("get_user_pages_remote(): failed to pin pages\n");
+        kfree(*pages);
+        *pages = NULL;
         return -EFAULT;
     }
 
@@ -250,16 +265,18 @@ static int pin_and_mmap_pages(
      */
     *mmap_addr = vmap(*pages, num_pages, VM_MAP, PAGE_KERNEL);
     if (!*mmap_addr) {
+        pr_err("vmap() failed\n");
         for (i = 0; i < num_pages; i++)
             put_page((*pages)[i]);
         kfree(*pages);
+        *pages = NULL;
         return -ENOMEM;
     }
 
     /*
      * Address returned by vmap is aligned by PAGE_SIZE
      *
-     * Increment mapped memory by offset into first page to get 
+     * Adjust mapped memory by offset into first page to get 
      * actual start address of guest memory.
      */
     *mmap_addr += (userspace_addr & ~PAGE_MASK);
@@ -309,7 +326,8 @@ long vhost_console_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
     struct console_device* device = file->private_data;
     struct vhost_vring_state    state_data;
     struct vhost_vring_addr     addr_data;
-    struct vhost_vring_fd       fd_data;
+    struct vhost_vring_fd       efd_data;
+    struct vhost_console_output output_fd_data;
     struct memtable             mt;
     struct file*                output_fd;
     struct virtqueue*           vq;
@@ -345,17 +363,17 @@ long vhost_console_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
          * Virtqueue is marked as ready; device may begin processing I/O requests now
          */
         case VHOST_SET_VRING_KICK:
-            if (copy_from_user(&fd_data, (int __user *) arg, sizeof(struct vhost_vring_fd))) {
+            if (copy_from_user(&efd_data, (int __user *) arg, sizeof(struct vhost_vring_fd))) {
                 pr_err("copy_from_user() failed to copy some bytes");
                 return -EFAULT;
             }
-            device->queues[fd_data.queue_sel].kick_efd = eventfd_ctx_fdget(fd_data.fd);
-            if (IS_ERR(device->queues[fd_data.queue_sel].kick_efd)) {
+            device->queues[efd_data.queue_sel].kick_efd = eventfd_ctx_fdget(efd_data.fd);
+            if (IS_ERR(device->queues[efd_data.queue_sel].kick_efd)) {
                 pr_err("eventfd_ctx_fdget()\n");
-                return PTR_ERR(device->queues[fd_data.queue_sel].kick_efd);
+                return PTR_ERR(device->queues[efd_data.queue_sel].kick_efd);
             }
-            device->queues[fd_data.queue_sel].queue_ready = 1;
-            if (fd_data.queue_sel == 1 && device->work_thread) {
+            device->queues[efd_data.queue_sel].queue_ready = 1;
+            if (efd_data.queue_sel == 1 && device->work_thread) {
                 wake_up_process(device->work_thread);
             }
             break;
@@ -373,18 +391,18 @@ long vhost_console_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
          * a special device file used to emulate console device.
          */
         case VHOST_SET_OUTPUT_FD:
-            if (copy_from_user(&fd_data, (int __user *) arg, sizeof(struct vhost_vring_fd))) {
+            if (copy_from_user(&output_fd_data, (int __user *) arg, sizeof(struct vhost_console_output))) {
                 pr_err("copy_from_user() failed to copy some bytes");
                 return -EFAULT;
             }
-            output_fd = fget(fd_data.fd);
+            output_fd = fget(output_fd_data.fd);
             output_fd->f_flags = O_NONBLOCK;
             if (!output_fd) {
                 pr_err("fdget(): received invalid file via VHOST_SET_OUTPUT_FD\n");
                 return -EBADF;
             }
-            device->queues[fd_data.queue_sel].output_fd = output_fd;
-            device->queues[fd_data.queue_sel].output_off = 0;
+            device->queues[output_fd_data.queue_sel].output_fd = output_fd;
+            device->queues[output_fd_data.queue_sel].output_off = 0;
             break;
         /* 
          * Hypervisor provides /dev/vhost-console information to map guest physical memory to 
@@ -445,7 +463,7 @@ int vhost_console_open(struct inode *inode, struct file *file) {
  */
 int vhost_console_release(struct inode *inode, struct file *file) {
     struct console_device* device = file->private_data;
-    int queue_sel, i;
+    int queue_sel;
 
     /*
      * Stop running worker thread to avoid further virtqueue processing
@@ -481,13 +499,15 @@ int vhost_console_release(struct inode *inode, struct file *file) {
         */
         device->guest_memory -= (device->mt.userspace_guest_addr & ~PAGE_MASK);
         vunmap(device->guest_memory);
-        for (i = 0; i < device->num_guest_pages; i++) {
-            /* 
-             * Reduce ref count of pages within hypervisor address space that contain
-             * guest physical memory.
-             */
-            put_page(device->guest_pages[i]);
-        }
+        device->guest_memory = NULL;
+    }
+
+    /* 
+     * Unpin pages within hypervisor address space that contain
+     * guest physical memory.
+     */
+    if (device->guest_pages) {
+        unpin_user_pages(device->guest_pages, device->num_guest_pages);
         kfree(device->guest_pages);
     }
 

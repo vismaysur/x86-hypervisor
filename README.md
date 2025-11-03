@@ -201,6 +201,12 @@ Hello World!
 4. **I/O Operations**: Guest populates descriptors, updates available ring, writes to QueueNotify
 5. **Device Processing**: Host/kernel processes buffers and updates used ring
 
+#### VirtIO Implementation Notes:
+The driver and the device negotiate `VIRTIO_F_IN_ORDER` (bit 35).  Only **direct descriptors** are used – indirect descriptor tables are not supported. The queue size is fixed to 16 entries and the driver never re‑orders descriptors.
+
+These restrictions keep the code simple and eliminate the need for `id` matching
+in the used ring (the guest can reclaim buffers by counting `used->idx` only).
+
 #### Memory layout
 
 ```

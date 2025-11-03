@@ -1,6 +1,7 @@
 #ifndef VHOST_CONSOLE_H
 #define VHOST_CONSOLE_H
 
+/* Defines IOCTL commands for /dev/vhost-console */
 #define MYCHARDEV_MAGIC         'M'
 #define VHOST_SET_VRING_NUM     _IOW(MYCHARDEV_MAGIC, 0, struct vhost_vring_state)
 #define VHOST_SET_VRING_ADDR    _IOW(MYCHARDEV_MAGIC, 1, struct vhost_vring_addr)

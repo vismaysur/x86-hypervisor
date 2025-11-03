@@ -1,7 +1,7 @@
 #ifndef VIRTIO_CONTROL_REGS_H
 #define VIRTIO_CONTROL_REGS_H
 
-// Memory mapped control registers
+/* Memory mapped control registers */
 #define REG_MAGIC               0x000
 #define REG_DEVICE_VERSION      0x004
 #define REG_DEVICE_ID           0x008

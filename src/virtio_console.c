@@ -8,87 +8,118 @@
 #include <sys/ioctl.h>
 #include "vhost_console.h"
 
+/* VirtIO console device state */
 struct console_device device = {
-    // Host offered features
-    // BIT(0) = VIRTIO_CONSOLE_F_SIZE
-    // BIT(32) = VIRTIO_F_VERSION_1
-    // BIT(35) = VIRTIO_F_IN_ORDER
+    /*
+     * Host offered features
+     * BIT(0) = VIRTIO_CONSOLE_F_SIZE
+     * BIT(32) = VIRTIO_F_VERSION_1
+     * BIT(35) = VIRTIO_F_IN_ORDER
+     */
     .device_features = (1ULL << 0) | (1ULL << 32) | (1ULL << 35),
-    // Select lower (0) or upper (1) bits of features for subsequent ops
+    /* Select lower (0) or upper (1) bits of features for subsequent ops */
     .device_features_sel = 0,
-    // Guest accepted features; initialized to 0
+    /* Guest accepted features; initialized to 0 */
     .driver_features = 0,
-    // Select lower (0) or upper (1) bits of features for subsequent ops
+    /* Select lower (0) or upper (1) bits of features for subsequent ops */
     .driver_features_sel = 0,
-    // Device status register
+    /* Device status register */
     .device_status = 0,
-    // Interrupt status register
+    /* Interrupt status register */
     .interrupt_status = 0,
-    // Currently selected queue index
+    /* Currently selected queue index */
     .queue_sel = 0,
-    // Maximum queue size offerred by host (tuned to fit one page)
+    /* Maximum queue size offerred by host (tuned to fit one page) */
     .queue_num_max = 38,
-    // Virtqueues used for device-guest communication
+    /* Virtqueues used for device-guest communication */
     .queues = {{0}},
-    // Device config space
+    /* Device config space */
     .console_config = {
         .cols = 80,
         .rows = 24,
     }
 };
 
-// Convert guest "physical" address to host virtual address
+/* Converts guest "physical" address to host virtual address */
 static inline void* guest_to_host_va(uint32_t ptr) {
     return (char *) guest_physical_mem_base + (ptr - 0x1000); 
 }
 
-// Initialization is done in kernel-space (Vhost)
-// Userspace func kept here for benchmarking.
+/*
+ * Hypervisor is responsible for correctly initializing used vring.
+ */
 static inline void initialize_used_ring(void* ring_addr) {
-    // used->flags
+    /* used->flags */
     *((char*) ring_addr) = 0;           
-    // used->idx
+    /* used->idx */
     *((char*) ring_addr + 16) = 0;
 }
 
-// Virtqueue is done in kernel-space (Vhost)
-// Userspace func kept here for benchmarking.
+/*
+ * Virtqueue processing: device must walk available vring entries -> obtain references 
+ * to descriptor vring entries, and read each desc entry -> obtain address of buffer to process.
+ *
+ * May be accelerated by setting up a worker thread in kernel space that handles this on each 
+ * write to QueueNotify register, avoiding expensive context switches on every I/O request.
+ */
 static inline void walk_used_vring(uint8_t selected_queue, int vcpufd, int outputfd) {    
+    /* base address of available table/vring */
     char* avail_base = (char *) guest_to_host_va(device.queues[selected_queue].avail_addr);
+    
+    /* index into next free available table/vring entry to use */
     uint16_t avail_idx = *(uint16_t*)(avail_base + 2);
-
+    
+    /* base address of used table/vring */
     char* used_base = (char *) guest_to_host_va(device.queues[selected_queue].used_addr);
+    
+    /* index into next free used table/vring entry to use */
     uint16_t used_idx = *(uint16_t*)(used_base + 2);
 
+    /* base address of descriptor table/vring */
     char* desc_base = (char *) guest_to_host_va(device.queues[selected_queue].desc_addr);
-    
+
+    /* nothing to process */
+    if (used_idx == avail_idx) return;
+
     while (used_idx != avail_idx) {
+        /*
+         * Gets first 2-byte entry in available vring that hasn't yet been read by device
+         * Entry is read to get next descriptor vring entry index that must be read.
+         */
         uint16_t* avail_ring_entry = (uint16_t *) (avail_base + 4 + 2 * (used_idx % device.queues[selected_queue].num));
         uint16_t desc_idx = *(avail_ring_entry);
 
+        /*
+         * Use index obtained from available table / vring entry to get descriptor vring entry
+         * Read indexed descriptor vring entry to find memory buffer that must be processed.
+         */
         char* desc_ring_entry = (desc_base + desc_idx * 16);
         uint64_t addr = *(uint64_t*)(desc_ring_entry);
         uint32_t len = *(uint32_t*)(desc_ring_entry + 8);
-        // uint16_t flags = *(uint16_t*)(desc_ring_entry + 12);
-        // uint16_t next = *(uint16_t*)(desc_ring_entry + 14); 
 
+        /*
+         * Get address of the buffer to process in hypervisor address space.
+         */
         char* buffer_addr = guest_to_host_va(addr);
 
-        // EMULATE CONSOLE!!
+        /* EMULATE CONSOLE!! */
         dprintf(outputfd, "%.*s", len, buffer_addr);         
 
         used_idx++;
     }
 
-    // update used_idx to reflect walked used vring entries
+    /* Update used_idx to reflect 'walked' used vring entries */
     *(uint16_t*)(used_base + 2) = used_idx;
 
-    device.interrupt_status |= 1;
+    /* TODO: figure out how to inject interrupts/notifications into guest VM */
+    // device.interrupt_status |= 1;
     // inject_interrupt_manual(vcpufd, 33);
 }
 
-// Handler for KVM_EXIT_MMIO: driver read from memory mapped control registers belonging 
-// to VirtIO console device).
+/* 
+ * Handler for KVM_EXIT_MMIO: driver read from memory mapped control registers belonging 
+ * to VirtIO console device).
+ */
 void handle_mmio_read(uint64_t address, unsigned char* data, int len, int vcpufd, struct vhost_state* state) {
     switch (address - VIRTIO_MMIO_BASE) {
         case REG_MAGIC: {
@@ -127,8 +158,10 @@ void handle_mmio_read(uint64_t address, unsigned char* data, int len, int vcpufd
     }
 }
 
-// Handler for KVM_EXIT_MMIO: driver wrote to memory mapped control registers belonging 
-// to VirtIO console device).
+/*
+ * Handler for KVM_EXIT_MMIO: driver wrote to memory mapped control registers belonging 
+ * to VirtIO console device).
+ */
 int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd, struct vhost_state* state, int output_fd) {
    switch (address - VIRTIO_MMIO_BASE) {
         case REG_STATUS: {
@@ -156,15 +189,21 @@ int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd
                         break;
                     case 4: { // DRIVER_OK (4 ~= BIT 2)
                         printf( "=== Driver is set up; console device is live ===\n" );
-                        // If DRIVER_OK is set, after it sets DEVICE_NEEDS_RESET, the device MUST send a device configuration change notification to the driver.
+                        /* 
+                         * If DRIVER_OK is set, after it sets DEVICE_NEEDS_RESET, the device MUST send a 
+                         * device configuration change notification to the driver.
+                         */
                         if (device.device_status & (1 << 6)) {
-                            device.interrupt_status |= (1 << 1);
+                            /* TODO: figure out how to inject interrupts/notifications into guest VM */
+                            // device.interrupt_status |= (1 << 1);
                             // inject_interrupt_manual(vcpufd, 33);
                         }
                         break;
                     }
-                    // Driver has read device_features, and set its own bits in driver_features
-                    // to request features; device must now enforce feature request correctness.
+                    /*
+                     * Driver has read device_features, and set its own bits in driver_features
+                     * to request features; device must now enforce feature request correctness.
+                     */
                     case 8: { // FEATURES_OK (8 ~= BIT 3)
                         if (device.driver_features & (~device.device_features)) {
                             printf( "=== Feature negotation failed (driver requested unsupported features) ===\n" );
@@ -189,17 +228,21 @@ int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd
             break;
         }
         case REG_QUEUE_NOTIFY: {
-            // Virtqueue processing should be done in kernel-space (Vhost)
-            // Userspace logic kept here for benchmarking
+            /*
+             * If vhost is enabled, KVM should writes to this register aren't relayed to userspace
+             * hypervisor; the I/O should be handled in kernel space itself.
+             */
 
-            // The device MUST NOT consume buffers or send any used buffer notifications 
-            // to the driver before DRIVER_OK.
+            /*
+             * The device MUST NOT consume buffers or send any used buffer notifications 
+             * to the driver before DRIVER_OK.
+             */
             if (!(device.device_status & 4)) return 0;
 
             uint8_t queue_sel;
             memcpy(&queue_sel, data, len);
 
-            // Devices for which QueueReady is set to 0 must not be active.
+            /* Devices for which QueueReady is set to 0 must not be active. */
             if (!device.queues[queue_sel].queue_ready) return 0;
 
             walk_used_vring(queue_sel, vcpufd, output_fd);
@@ -235,12 +278,13 @@ int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd
         }
         case REG_QUEUE_DEVICE_LOW: {
             memcpy(&device.queues[device.queue_sel].used_addr, data, len);
-            // host is responsible for properly setting up the virtqueue used rings.
+            
+            /* Host is responsible for properly setting up the virtqueue used rings. */
             void* used_ring = guest_to_host_va(device.queues[device.queue_sel].used_addr);
             initialize_used_ring(used_ring);
             break;
         }
-        // we ignore upper 32 bits of addrs in this implementation
+        /* we ignore upper 32 bits of addrs in this implementation */
         case REG_QUEUE_DESC_HIGH:
         case REG_QUEUE_DRIVER_HIGH:
         case REG_QUEUE_DEVICE_HIGH:
@@ -248,10 +292,11 @@ int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd
         case REG_QUEUE_READY: {
             memcpy(&device.queues[device.queue_sel].queue_ready, data, len);
             
-            // Activate queue in kernel space if vhost acceleration is enabled
+            /* Activate queue in kernel space if vhost acceleration is enabled */
             if (device.queues[device.queue_sel].queue_ready && state->vhostfd != -1) {
                 int ret;
 
+                /* Notify /dev/vhost-console of queue size */
                 struct vhost_vring_state vring_state = {
                     .queue_sel = device.queue_sel,
                     .num = device.queues[device.queue_sel].num
@@ -267,6 +312,7 @@ int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd
                     return 1;
                 }
 
+                /* Notify /dev/vhost-console of vring addresses in guest physical memory */
                 struct vhost_vring_addr addr = {
                     .queue_sel = device.queue_sel,
                     .desc_addr = device.queues[device.queue_sel].desc_addr,
@@ -284,6 +330,10 @@ int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd
                     return 1;
                 }
 
+                /* 
+                 * Notify /dev/vhost-console of eventfd that KVM will signal 
+                 * on guest mmio writes to QueueNotify register.
+                 */
                 struct vhost_vring_fd file = {
                     .queue_sel = device.queue_sel,
                     .fd = state->kick_efd,
@@ -304,10 +354,12 @@ int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd
             }
             break;
         }
+        /* TODO: figure out how to inject interrupts/notifications into guest VM */
+        /* Guest notifies host that events causing interrupt have been handled */
         case REG_INTERRUPT_ACK: {
-            uint8_t interrupt_acked;
-            memcpy(&interrupt_acked, data, len);
-            device.interrupt_status ^= interrupt_acked;
+            // uint8_t interrupt_acked;
+            // memcpy(&interrupt_acked, data, len);
+            // device.interrupt_status ^= interrupt_acked;
             break;
         }
         default:

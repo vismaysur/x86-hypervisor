@@ -10,6 +10,9 @@
 #define CONSOLE_QUEUE_DEVICE    0x5200
 #define CONSOLE_VIRTQUEUE_SIZE  0x10
 
+/*
+ * Wraps inline assembly instruction `outb` to write to serial I/O port
+ */
 __attribute__((always_inline))
 static inline void outb(uint16_t port, uint8_t val) {
     asm volatile (
@@ -19,6 +22,10 @@ static inline void outb(uint16_t port, uint8_t val) {
     );
 }
 
+/*
+ * Helper to perform a 32-bit (double word in x86) read from the given address: 
+ * base address + offset
+ */
 __attribute__((always_inline))
 static inline uint32_t mmio_read32(volatile void* base, uint32_t offset /* in bytes */) {
     asm volatile("mfence" ::: "memory");
@@ -27,6 +34,10 @@ static inline uint32_t mmio_read32(volatile void* base, uint32_t offset /* in by
     return *val;
 }
 
+/*
+ * Helper to perform a 16-bit (word in x86) read from the given address: 
+ * base address + offset
+ */
 __attribute__((always_inline))
 static inline uint16_t mmio_read16(volatile void* base, uint32_t offset /* in bytes */) {
     asm volatile("mfence" ::: "memory");
@@ -35,6 +46,10 @@ static inline uint16_t mmio_read16(volatile void* base, uint32_t offset /* in by
     return *val;
 }
 
+/*
+ * Helper to perform a 8-bit (byte in x86) read from the given address: 
+ * base address + offset
+ */
 __attribute__((always_inline))
 static inline uint8_t mmio_read8(volatile void* base, uint32_t offset /* in bytes */) {
     asm volatile("mfence" ::: "memory");
@@ -43,6 +58,10 @@ static inline uint8_t mmio_read8(volatile void* base, uint32_t offset /* in byte
     return *val;
 }
 
+/*
+ * Helper to perform a 32-bit (double word in x86) write to the given address: 
+ * base address + offset
+ */
 __attribute__((always_inline))
 static inline void mmio_write32(volatile void* base, uint32_t offset /* in bytes */, uint32_t val) {
     asm volatile("mfence" ::: "memory");
@@ -50,6 +69,10 @@ static inline void mmio_write32(volatile void* base, uint32_t offset /* in bytes
     asm volatile("mfence" ::: "memory");
 }
 
+/*
+ * Helper to perform a 16-bit (word in x86) write from the given address: 
+ * base address + offset
+ */
 __attribute__((always_inline))
 static inline void mmio_write16(volatile void* base, uint32_t offset /* in bytes */, uint16_t val) {
     asm volatile("mfence" ::: "memory");
@@ -57,6 +80,10 @@ static inline void mmio_write16(volatile void* base, uint32_t offset /* in bytes
     asm volatile("mfence" ::: "memory");
 }
 
+/*
+ * Helper to perform a 8-bit (byte in x86) write to the given address: 
+ * base address + offset
+ */
 __attribute__((always_inline))
 static inline void mmio_write8(volatile void* base, uint32_t offset /* in bytes */, uint8_t val) {
     asm volatile("mfence" ::: "memory");
@@ -64,6 +91,10 @@ static inline void mmio_write8(volatile void* base, uint32_t offset /* in bytes 
     asm volatile("mfence" ::: "memory");
 }
 
+/*
+ * Iterates over given error message argument and prints each char 
+ * to the serial I/O port.
+ */
 __attribute__((always_inline))
 static inline void print_error_to_serial(char* error_message) {
     for (int i = 0; ; i++) {
@@ -72,12 +103,19 @@ static inline void print_error_to_serial(char* error_message) {
     }
 }
 
+/*
+ * Prints given error message argument and calls x86 HLT instruction (triggers VM exit).
+ */
 __attribute__((always_inline))
 static inline void exit_with_error(char* error_message) {
     print_error_to_serial(error_message);
     while (1) asm("hlt");
 }
 
+/*
+ * Performs device verification, initialization, feature negotiation 
+ * and virtqueue configuration.
+ */
 __attribute__((always_inline))
 static inline void init_virtio_console() {
     volatile void* device_mmio_base = (void *) VIRTIO_MMIO_BASE;
@@ -202,6 +240,9 @@ static inline void init_virtio_console() {
     return;
 }
 
+/*
+ * Sets QueueReady register to 0, preventing further device operations.
+ */
 __attribute__((always_inline))
 static inline void close_virtio_console() {
     volatile void* device_mmio_base = (void *) VIRTIO_MMIO_BASE;
@@ -211,6 +252,10 @@ static inline void close_virtio_console() {
     while (mmio_read8(device_mmio_base, REG_QUEUE_READY) != 0);
 }
 
+/*
+ * Adds new entry to virtqueue descriptor vring, pointing to a new buffer address for 
+ * the device to process.
+ */
 __attribute__((always_inline))
 static inline void virtq_add_desc(
     uint16_t desc_idx, uint32_t addr, uint32_t len, uint16_t flags, uint16_t next
@@ -226,6 +271,10 @@ static inline void virtq_add_desc(
     mmio_write16(0, desc_entry_addr+14, next);
 }
 
+/*
+ * Adds new virtqueue descriptor vring index to next 
+ * in-order `available vring` / driver area entry.
+ */
 __attribute__((always_inline))
 static inline void virtq_push_avail(uint16_t desc_idx) {
     // read avail->idx
@@ -240,6 +289,12 @@ static inline void virtq_push_avail(uint16_t desc_idx) {
     mmio_write16(0, avail_idx_addr, avail_idx+1);
 }
 
+/*
+ * Spin waits until a descriptor entry is free to use.
+ *
+ * (avail->idx + 1) == used->idx condition indicates all descriptor entries are 
+ * currently being used, and are yet to be processed by the device.
+ */
 __attribute__((always_inline))
 static inline uint16_t virtq_get_next_free_desc(void) {
     uint16_t avail_idx, used_idx;
@@ -259,6 +314,15 @@ static inline uint16_t virtq_get_next_free_desc(void) {
     return avail_idx % CONSOLE_VIRTQUEUE_SIZE;
 }
 
+/*
+ * Core VirtIO console driver API:
+ *
+ * Prints given string argument to VirtIO console device by getting a 
+ * free descriptor vring entry, adding it to the next in-order available vring entry 
+ * and writing to QueueNotify register to trigger the device to walk available vring,
+ * dereference the corresponding descriptor vring entry, and finally fill a used vring entry
+ * to mark the buffer pointed to by the descriptor entry as read.
+ */
 __attribute__((always_inline))
 static inline void print_to_console(char* str) {
     volatile void* device_mmio_base = (void *) VIRTIO_MMIO_BASE;
@@ -280,16 +344,13 @@ static inline void print_to_console(char* str) {
     mmio_write16(device_mmio_base, REG_QUEUE_NOTIFY, 1);   // QueueNotify (Virtqueue Index = 1)
 }
 
-__attribute__((always_inline))
-static inline void print_async(char* str) {
-    print_to_console(str);
-}
-
+/*
+ * Guest VM entry point
+ */
 int main() {
     init_virtio_console();
 
-    for (int i = 0; i < 15; i++)
-        print_async("Hello World!\n");
+    print_to_console("Hello World!\n");
         
     close_virtio_console();
 

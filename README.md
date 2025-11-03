@@ -141,7 +141,7 @@ make
 insmod build/vhost_console.ko
 ```
 
-Note: you made need to boot a custom Linux kernel in QEMU with module loading enabled for development purposes. Loading custom kernel modules isn't always straightforward on modern systems with security features enabled (definitely do not find a way to load this module into your kernel, it is not production ready).
+Note: you may need to boot a custom Linux kernel in QEMU with module loading enabled for development purposes. Loading custom kernel modules isn't always straightforward on modern systems with security features enabled (definitely do not find a way to load this module into your kernel, it is not production ready).
 
 ### Usage
 

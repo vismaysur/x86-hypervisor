@@ -31,6 +31,13 @@ struct vhost_vring_fd {
     int      fd;
 };
 
+// Used for VHOST_SET_MEMTABLE ioctl
+struct memtable {
+    uint64_t gpa_base;              // guest physical address base
+    uint64_t mem_size;              // size of mapped guest memory
+    uint64_t userspace_guest_addr;  // address of guest memory in VMM address space
+};
+
 // Virtqueue used for guest-device communication
 struct virtqueue {
     uint64_t desc_addr;

@@ -7,6 +7,7 @@
 #define VHOST_SET_VRING_KICK    _IOW(MYCHARDEV_MAGIC, 2, struct vhost_vring_fd)
 #define VHOST_SET_OWNER         _IO(MYCHARDEV_MAGIC, 3)
 #define VHOST_SET_OUTPUT_FD     _IOW(MYCHARDEV_MAGIC, 4, struct vhost_vring_fd)
+#define VHOST_SET_MEMTABLE      _IOW(MYCHARDEV_MAGIC, 5, struct memtable)
 
 struct vhost_state {
     int vhostfd;    // /dev/vhost-console

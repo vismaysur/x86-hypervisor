@@ -9,12 +9,13 @@
 #include <stdio.h>
 #include <sys/mman.h>
 #include <sys/eventfd.h>
+#include <time.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <getopt.h>
 
 #include "vhost_console.h"
 #include "virtio_console.h"
-#include "helpers.h"
 #include "virtio_control_regs.h"
 
 #define PAGE_SIZE           getpagesize()
@@ -32,7 +33,7 @@ static inline int setup_sregisters(int vcpufd) {
     // get data structure to configure initial state of special registers of the VCPU
     ret = ioctl(vcpufd, KVM_GET_SREGS, &sregs);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
         return 1;
     } 
 
@@ -59,7 +60,7 @@ static inline int setup_sregisters(int vcpufd) {
 
     ret = ioctl(vcpufd, KVM_SET_SREGS, &sregs);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
         return 1;
     } 
 
@@ -78,7 +79,7 @@ static inline int setup_registers(int vcpufd) {
     regs.rsp = 0x5000;     
     ret = ioctl(vcpufd, KVM_SET_REGS, &regs);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
         return 1;
     } 
 
@@ -110,34 +111,34 @@ static inline int setup_memory_region(int guestcode_fd, int vmfd, void** guest_m
     // get size of guest binary
     guestcode_size = lseek(guestcode_fd, 0, SEEK_END);
     if (guestcode_size == -1) {
-        fprintf(stderr, ERROR_COLOR "lseek(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "lseek(): %s\n" , strerror(errno));
         return 1; 
     }
 
     // reset file pointer back to beginning of file
     ret = lseek(guestcode_fd, 0, SEEK_SET);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "lseek(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "lseek(): %s\n" , strerror(errno));
         return 1;
     }
 
     // allocate memory to hold guest binary, read into allocated memory.
     code = malloc(guestcode_size);
     if (code == NULL) {
-        fprintf(stderr, ERROR_COLOR "malloc(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "malloc(): %s\n" , strerror(errno));
         return 1; 
     }
 
     ret = read(guestcode_fd, code, guestcode_size);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "read(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "read(): %s\n" , strerror(errno));
         return 1; 
     }
 
     // allocate 4 pages of page aligned, zero-initialized shared memory to hold guest code and other segments.
     guest_physical_mem = mmap(NULL, PAGE_SIZE * 5, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0); 
     if (guest_physical_mem == (void*) -1) {
-        fprintf(stderr, ERROR_COLOR "mmap(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "mmap(): %s\n" , strerror(errno));
         return 1;
     }
 
@@ -158,7 +159,7 @@ static inline int setup_memory_region(int guestcode_fd, int vmfd, void** guest_m
 
     ret = ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &memregion);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
         return 1;
     }
 
@@ -173,13 +174,13 @@ static inline int setup_vhost(int vmfd, int vcpufd, struct vhost_state* state, i
 
     vhostfd = open("/dev/vhost-console", O_RDWR);
     if (vhostfd == -1) {
-        fprintf(stderr, ERROR_COLOR "open(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "open(): %s\n" , strerror(errno));
         return 1;
     }
-
-    kick_efd = eventfd(1, EFD_NONBLOCK | EFD_CLOEXEC);
+    
+    kick_efd = eventfd(1, EFD_CLOEXEC);
     if (kick_efd == -1) {
-        fprintf(stderr, ERROR_COLOR "eventfd(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "eventfd(): %s\n" , strerror(errno));
         return 1;
     }
 
@@ -193,7 +194,7 @@ static inline int setup_vhost(int vmfd, int vcpufd, struct vhost_state* state, i
 
     ret = ioctl(vmfd, KVM_IOEVENTFD, &fd);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "ioctl(KVM_IOEVENTFD): %s\n" , strerror(errno));
         return 1;
     }
 
@@ -202,8 +203,30 @@ static inline int setup_vhost(int vmfd, int vcpufd, struct vhost_state* state, i
 
     ret = ioctl(vhostfd, VHOST_SET_OWNER, NULL);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "ioctl(VHOST_SET_OWNER): %s\n" , strerror(errno));
         return 1;
+    }
+
+    struct vhost_vring_fd output_fd_data = {
+        .queue_sel = 1,  // TX queue
+        .fd = output_fd
+    };
+    
+    ret = ioctl(vhostfd, VHOST_SET_OUTPUT_FD, &output_fd_data);
+    if (ret == -1) {
+        fprintf(stderr, "ioctl(VHOST_SET_OUTPUT_FD): %s\n", strerror(errno));
+        return 1;
+    }
+
+    struct memtable mt = {
+        .gpa_base = 0x1000,
+        .mem_size = 0x5000,
+        .userspace_guest_addr = (uint64_t) guest_physical_mem_base,
+    };
+
+    ret = ioctl(vhostfd, VHOST_SET_MEMTABLE, &mt);
+    if (ret == -1) {
+        fprintf(stderr, "ioctl(VHOST_SET_MEMTABLE): %s\n", strerror(errno));
     }
 
     return 0;
@@ -212,51 +235,81 @@ static inline int setup_vhost(int vmfd, int vcpufd, struct vhost_state* state, i
 static inline int close_vhost(struct vhost_state* state) {
     if (state->vhostfd == -1) return 0;
 
+    if (state->kick_efd != -1) {
+        close(state->kick_efd);
+    }
+
     int ret = close(state->vhostfd);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "close(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "close(): %s\n" , strerror(errno));
         return 1;
     }
 
     return 0;
 }
 
-int main() {
+static uint64_t get_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
+}
+
+int main(int argc, char* argv[]) {
     int kvm, ret, vmfd, vcpufd, guestcode_fd;
     void *guest_mem;
     struct kvm_run* run;
     size_t kvm_run_mmap_size;
     int output_fd;
     bool halted;
+    bool use_vhost = false;
+    uint64_t start_us, end_us;
+    int opt;
 
     struct vhost_state state = {
         .vhostfd = -1,
         .kick_efd = -1
     };
 
-    // emulate console device using console_output.txt file
+    while ((opt = getopt(argc, argv, "vh")) != -1) {
+        switch (opt) {
+            case 'v':
+                use_vhost = true;
+                printf("=== Vhost acceleration enabled ===\n");
+                break;
+            case 'h':
+                printf("Usage: %s [-v] [-h]\n", argv[0]);
+                printf("  -v    Enable vhost acceleration\n");
+                printf("  -h    Show this help message\n");
+                return 0;
+                break;
+            default:
+                return 1;
+        }
+    }
+
+    // emulate console device using /dev/vmm-console file
     output_fd = open("/dev/vmm-console", O_WRONLY | O_CREAT | O_TRUNC);
     if (output_fd == -1) {
-        fprintf(stderr, ERROR_COLOR "open(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "open(): %s\n" , strerror(errno));
         return 1;
     } 
 
     // user logged in at console must be part of kvm group to access /dev/kvm
     kvm = open("/dev/kvm", O_RDWR | O_CLOEXEC);
     if (kvm == -1) {
-        fprintf(stderr, ERROR_COLOR "open(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "open(): %s\n" , strerror(errno));
         return 1;
     }
 
     // ensure usage of stable version of the KVM API: Version 12
     ret = ioctl(kvm, KVM_GET_API_VERSION, NULL);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
         return 1;
     }
 
     if (ret != 12) {
-        fprintf(stderr, ERROR_COLOR "KVM_GET_API_VERSION: %d, expected 12" RESET_COLOR, ret);
+        fprintf(stderr,  "KVM_GET_API_VERSION: %d, expected 12" , ret);
         return 1;
     }
 
@@ -264,14 +317,14 @@ int main() {
     // VM has no memory or virtual CPUs
     vmfd = ioctl(kvm, KVM_CREATE_VM, 0);
     if (vmfd == -1) {
-        fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
         return 1;
     }
 
      // read guest.bin from disk
     guestcode_fd = open("build/guest.bin", O_RDONLY);
     if (guestcode_fd == -1) {
-        fprintf(stderr, ERROR_COLOR "open(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "open(): %s\n" , strerror(errno));
         return 1; 
     }
 
@@ -282,21 +335,21 @@ int main() {
     // create virtual CPU to run code in guest physical memory.
     vcpufd = ioctl(vmfd, KVM_CREATE_VCPU, 0);
     if (vcpufd == -1) {
-        fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
         return 1;
     } 
 
     // determine size of memory to map to hold kvm_run structure
     kvm_run_mmap_size = ioctl(kvm, KVM_GET_VCPU_MMAP_SIZE, NULL);
     if (kvm_run_mmap_size == -1) {
-        fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
         return 1;
     } 
 
     // allocate kvm_run mmap_size sized memory for kvm_run data structure.
     run = mmap(NULL, kvm_run_mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED, vcpufd, 0);
     if (run == (void*) -1) {
-        fprintf(stderr, ERROR_COLOR "mmap(): %s\n" RESET_COLOR, strerror(errno));
+        fprintf(stderr,  "mmap(): %s\n" , strerror(errno));
         return 1;
     }
     
@@ -307,22 +360,25 @@ int main() {
     if ((ret = setup_registers(vcpufd))) return ret;
 
     // set up vhost-console device
-    if ((ret = setup_vhost(vmfd, vcpufd, &state, output_fd))) return ret;
+    if (use_vhost && (ret = setup_vhost(vmfd, vcpufd, &state, output_fd))) 
+        return ret;
 
     halted = false;
+
+    start_us = get_us();
 
     while (1) {
         // run VM with Intel VT
         ret = ioctl(vcpufd, KVM_RUN, NULL);
         if (ret == -1) {
-            fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
+            fprintf(stderr,  "ioctl(): %s\n" , strerror(errno));
             return 1;
         } 
 
         switch (run->exit_reason) {
             // VM called `hlt` instruction
             case KVM_EXIT_HLT: {
-                printf(DEBUG_COLOR "[KVM_EXIT_HLT: program halted normally] \n" RESET_COLOR);
+                printf("[KVM_EXIT_HLT: program halted normally] \n" );
                 halted = true;
                 break;
             }
@@ -333,26 +389,24 @@ int main() {
                     run->io.port == 0x3f8 &&
                     run->io.count == 1) {
                     char* serial_msg = ((char *) run + run->io.data_offset);
-                    fprintf(stderr, ERROR_COLOR "%s" RESET_COLOR, serial_msg);
+                    fprintf(stderr,  "%s" , serial_msg);
                 } else
-                    fprintf(stderr, ERROR_COLOR "[unhandled KVM_EXIT_IO]\n" RESET_COLOR);
+                    fprintf(stderr,  "[unhandled KVM_EXIT_IO]\n" );
                 break;
             }
             // VM read/wrote to memory outside its physical addr range
             // Used for VirtIO MMIO
             case KVM_EXIT_MMIO: {
                 if (run->mmio.phys_addr < VIRTIO_MMIO_BASE || run->mmio.phys_addr >= VIRTIO_MMIO_BASE + VIRTIO_MMIO_SIZE) {
-                    fprintf(stderr, ERROR_COLOR "[unhandled MMIO @ 0x%llx] \n" RESET_COLOR, run->mmio.phys_addr);
+                    fprintf(stderr,  "[unhandled MMIO @ 0x%llx] \n" , run->mmio.phys_addr);
                     halted = true;
                     break;
                 }
 
                 // Ignore writes to QueueNotify if vhost enabled
                 if (
-                    state.vhostfd != -1 && 
-                    run->mmio.phys_addr == VIRTIO_MMIO_BASE + REG_QUEUE_NOTIFY && 
-                    *run->mmio.data == 1 && 
-                    run->mmio.len == 2
+                    use_vhost && 
+                    run->mmio.phys_addr == VIRTIO_MMIO_BASE + REG_QUEUE_NOTIFY 
                 ) {
                     break;
                 }
@@ -368,7 +422,7 @@ int main() {
             case KVM_EXIT_FAIL_ENTRY: {
                 fprintf(
                     stderr, 
-                    ERROR_COLOR "[KVM_EXIT_FAIL_ENTRY: hardware_entry_failure_reason = %llx] \n" RESET_COLOR,
+                     "[KVM_EXIT_FAIL_ENTRY: hardware_entry_failure_reason = %llx] \n" ,
                     (unsigned long long) run->fail_entry.hardware_entry_failure_reason
                 );
                 halted = true;
@@ -378,14 +432,14 @@ int main() {
             case KVM_INTERNAL_ERROR_EMULATION: {
                 fprintf(
                     stderr,
-                    ERROR_COLOR "[KVM_INTERNAL_ERROR_EMULATION: suberror = 0x%x] \n" RESET_COLOR,
+                     "[KVM_INTERNAL_ERROR_EMULATION: suberror = 0x%x] \n" ,
                     run->emulation_failure.suberror
                 );
                 halted = true;
                 break;
             }
             default: {
-                fprintf(stderr, ERROR_COLOR "[Unhandled KVM exit reason: %d]\n" RESET_COLOR, run->exit_reason);
+                fprintf(stderr,  "[Unhandled KVM exit reason: %d]\n" , run->exit_reason);
                 halted = true;
                 break;
             }
@@ -394,27 +448,31 @@ int main() {
         if (halted) break;
     }
 
+    end_us = get_us();
+
+    printf("\nTime taken to run VM: %lu microseconds\n", end_us - start_us);
+
     // close vhost-console device
     if ((ret = close_vhost(&state))) return ret;
 
     // release memory page allocated for guest VM's memory
     ret = munmap(guest_mem, PAGE_SIZE * 5);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "munmap(): %s\n", strerror(errno));
+        fprintf(stderr,  "munmap(): %s\n", strerror(errno));
         return 1;
     } 
 
     // release memory allocated for kvm_run structure to track VM VCPU state
     ret = munmap(run, kvm_run_mmap_size);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "munmap(): %s\n", strerror(errno));
+        fprintf(stderr,  "munmap(): %s\n", strerror(errno));
         return 1;
     } 
 
     // close /dev/kvm device file
     ret = close(kvm);
     if (ret == -1) {
-        fprintf(stderr, ERROR_COLOR "close(): %s\n", strerror(errno));
+        fprintf(stderr,  "close(): %s\n", strerror(errno));
         return 1;
     }
 

@@ -1,5 +1,4 @@
 #include "virtio_console.h"
-#include "helpers.h"
 #include "virtio_control_regs.h"
 #include <errno.h>
 #include <linux/kvm.h>
@@ -38,21 +37,6 @@ struct console_device device = {
     }
 };
 
-// // Manually injects interrupt into VM
-// static inline int inject_interrupt_manual(int vcpufd, uint32_t irq_number) {
-//     struct kvm_interrupt irq = {
-//         .irq = irq_number
-//     };
-
-//     int ret = ioctl(vcpufd, KVM_INTERRUPT, &irq);
-//     if (ret == -1) {
-//         fprintf(stderr, ERROR_COLOR "ioctl(): %s\n" RESET_COLOR, strerror(errno));
-//         return 1;
-//     }
-
-//     return 0;
-// }
-
 // Convert guest "physical" address to host virtual address
 static inline void* guest_to_host_va(uint32_t ptr) {
     return (char *) guest_physical_mem_base + (ptr - 0x1000); 
@@ -79,7 +63,7 @@ static inline void walk_used_vring(uint8_t selected_queue, int vcpufd, int outpu
     char* desc_base = (char *) guest_to_host_va(device.queues[selected_queue].desc_addr);
     
     while (used_idx != avail_idx) {
-        uint16_t* avail_ring_entry = (uint16_t *) (avail_base + 4 + 2 * used_idx);
+        uint16_t* avail_ring_entry = (uint16_t *) (avail_base + 4 + 2 * (used_idx % device.queues[selected_queue].num));
         uint16_t desc_idx = *(avail_ring_entry);
 
         char* desc_ring_entry = (desc_base + desc_idx * 16);
@@ -93,7 +77,7 @@ static inline void walk_used_vring(uint8_t selected_queue, int vcpufd, int outpu
         // EMULATE CONSOLE!!
         dprintf(outputfd, "%.*s", len, buffer_addr);         
 
-        used_idx = (used_idx + 1) % device.queues[selected_queue].num;
+        used_idx++;
     }
 
     // update used_idx to reflect walked used vring entries
@@ -139,7 +123,7 @@ void handle_mmio_read(uint64_t address, unsigned char* data, int len, int vcpufd
             break;
         }
         default:
-            fprintf(stderr, ERROR_COLOR "[Error: doesn't handle MMIO read @ 0x%lx, of size %d]\n" RESET_COLOR, address, len);
+            fprintf(stderr,  "[Error: doesn't handle MMIO read @ 0x%lx, of size %d]\n" , address, len);
     }
 }
 
@@ -152,7 +136,7 @@ int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd
             memcpy(&value_written, data, len);
 
             if (value_written == 0) { // Entire status register is zeroed
-                printf(DEBUG_COLOR "=== Resetting VirtIO console device ===\n" RESET_COLOR);
+                printf( "=== Resetting VirtIO console device ===\n" );
                 device.driver_features = 0;
                 device.device_status = 0;
                 device.interrupt_status = 0;
@@ -165,13 +149,13 @@ int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd
 
                 switch (bit_changed) {
                     case 1: // ACKNOWLEDGE (1 ~= BIT 0)
-                        printf(DEBUG_COLOR "=== Guest OS has noticed device ===\n" RESET_COLOR);
+                        printf( "=== Guest OS has noticed device ===\n" );
                         break;
                     case 2: // DRIVER (2 ~= BIT 1)
-                        printf(DEBUG_COLOR "=== Guest OS knows how to drive device ===\n" RESET_COLOR);
+                        printf( "=== Guest OS knows how to drive device ===\n" );
                         break;
                     case 4: { // DRIVER_OK (4 ~= BIT 2)
-                        printf(DEBUG_COLOR "=== Driver is set up; console device is live ===\n" RESET_COLOR);
+                        printf( "=== Driver is set up; console device is live ===\n" );
                         // If DRIVER_OK is set, after it sets DEVICE_NEEDS_RESET, the device MUST send a device configuration change notification to the driver.
                         if (device.device_status & (1 << 6)) {
                             device.interrupt_status |= (1 << 1);
@@ -183,23 +167,23 @@ int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd
                     // to request features; device must now enforce feature request correctness.
                     case 8: { // FEATURES_OK (8 ~= BIT 3)
                         if (device.driver_features & (~device.device_features)) {
-                            printf(DEBUG_COLOR "=== Feature negotation failed (driver requested unsupported features) ===\n" RESET_COLOR);
+                            printf( "=== Feature negotation failed (driver requested unsupported features) ===\n" );
                             device.device_status &= ~8;
                         }
                         else if (device.device_features != device.driver_features) {
-                            printf(DEBUG_COLOR "=== Feature negotiation failed (driver doesn't recognize a mandatory feature) ===\n" RESET_COLOR);
+                            printf( "=== Feature negotiation failed (driver doesn't recognize a mandatory feature) ===\n" );
                             device.device_status &= ~8;
                         } else {
-                            printf(DEBUG_COLOR "=== Driver has acknowledged recognizable features; feature negotiation complete ===\n" RESET_COLOR);
+                            printf( "=== Driver has acknowledged recognizable features; feature negotiation complete ===\n" );
                         }
                         break;
                     }
                     case 128: { // FAILED (128 ~= BIT 7)
-                        printf(DEBUG_COLOR "=== Device initialization failed ===\n" RESET_COLOR);
+                        printf( "=== Device initialization failed ===\n" );
                         break;
                     }
                     default:
-                        fprintf(stderr, ERROR_COLOR "[Error: guest driver wrote to undefined device status bit (%d)]\n" RESET_COLOR, bit_changed);
+                        fprintf(stderr,  "[Error: guest driver wrote to undefined device status bit (%d)]\n" , bit_changed);
                 }
             }
             break;
@@ -302,18 +286,8 @@ int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd
 
                 struct vhost_vring_fd file = {
                     .queue_sel = device.queue_sel,
-                    .fd = output_fd,
+                    .fd = state->kick_efd,
                 };
-
-                ret = ioctl(state->vhostfd, VHOST_SET_OUTPUT_FD, &file);
-                if (ret == -1) {
-                    fprintf(
-                        stderr,
-                        "VHOST_SET_OUTPUT_FD ioctl() failed: %s\n",
-                        strerror(errno)
-                    );
-                    return 1;
-                }
 
                 file.queue_sel = device.queue_sel;
                 file.fd = state->kick_efd;
@@ -337,7 +311,7 @@ int handle_mmio_write(uint64_t address, unsigned char* data, int len, int vcpufd
             break;
         }
         default:
-            fprintf(stderr, ERROR_COLOR "[Error: doesn't handle MMIO read @ 0x%lx, of size %d]\n" RESET_COLOR, address, len);
+            fprintf(stderr,  "[Error: doesn't handle MMIO read @ 0x%lx, of size %d]\n" , address, len);
     }
 
     return 0;

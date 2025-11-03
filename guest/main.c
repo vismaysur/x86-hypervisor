@@ -10,8 +10,6 @@
 #define CONSOLE_QUEUE_DEVICE    0x5200
 #define CONSOLE_VIRTQUEUE_SIZE  0x10
 
-uint16_t next_free_desc = 0;
-
 __attribute__((always_inline))
 static inline void outb(uint16_t port, uint8_t val) {
     asm volatile (
@@ -230,14 +228,35 @@ static inline void virtq_add_desc(
 
 __attribute__((always_inline))
 static inline void virtq_push_avail(uint16_t desc_idx) {
+    // read avail->idx
+    uint32_t avail_idx_addr = (CONSOLE_QUEUE_DRIVER + 2);
+    uint16_t avail_idx = mmio_read16(0, avail_idx_addr);
+
     // add new ring entry to point to correct descriptor table entry
-    uint32_t avail_entry_addr = (CONSOLE_QUEUE_DRIVER + 4 + desc_idx * 2);
+    uint32_t avail_entry_addr = (CONSOLE_QUEUE_DRIVER + 4 + (avail_idx % CONSOLE_VIRTQUEUE_SIZE) * 2);
     mmio_write16(0, avail_entry_addr, desc_idx);
 
     // increment avail->idx
-    uint32_t avail_idx_addr = (CONSOLE_QUEUE_DRIVER + 2);
-    uint16_t avail_idx = mmio_read16(0, avail_idx_addr);
     mmio_write16(0, avail_idx_addr, avail_idx+1);
+}
+
+__attribute__((always_inline))
+static inline uint16_t virtq_get_next_free_desc(void) {
+    uint16_t avail_idx, used_idx;
+
+    do {
+        avail_idx = mmio_read16(0, CONSOLE_QUEUE_DRIVER + 2);   // avail->idx
+        
+        used_idx = mmio_read16(0, CONSOLE_QUEUE_DEVICE + 2);    // used->idx
+
+        if (((avail_idx + 1) % CONSOLE_VIRTQUEUE_SIZE) != used_idx) {
+            break;
+        }
+
+        asm volatile("pause" ::: "memory");
+    } while(1);
+
+    return avail_idx % CONSOLE_VIRTQUEUE_SIZE;
 }
 
 __attribute__((always_inline))
@@ -253,12 +272,12 @@ static inline void print_to_console(char* str) {
 
     uint32_t str_addr = (uint32_t) str;
 
+    uint16_t next_free_desc = virtq_get_next_free_desc();
+
     virtq_add_desc(next_free_desc, str_addr, strlen, 0, 0);
     virtq_push_avail(next_free_desc);
 
     mmio_write16(device_mmio_base, REG_QUEUE_NOTIFY, 1);   // QueueNotify (Virtqueue Index = 1)
-
-    next_free_desc = (next_free_desc + 1) % CONSOLE_VIRTQUEUE_SIZE;
 }
 
 __attribute__((always_inline))
@@ -269,8 +288,9 @@ static inline void print_async(char* str) {
 int main() {
     init_virtio_console();
 
-    print_async("Hello World!\n");
-
+    for (int i = 0; i < 15; i++)
+        print_async("Hello World!\n");
+        
     close_virtio_console();
 
     while (1) asm("hlt");
